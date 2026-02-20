@@ -1,4 +1,9 @@
+// Load env: .env first, then .env.production overrides in production
+const path = require('path');
 require('dotenv').config();
+if (process.env.NODE_ENV === 'production') {
+  require('dotenv').config({ path: path.join(__dirname, '.env.production'), override: true });
+}
 const app = require('./app');
 
 const PORT = process.env.PORT || 5000;

@@ -6,19 +6,23 @@ const app = express();
 // CORS: allow frontend (localhost:3000 in dev, digilync.net + www in prod)
 const defaultOrigins =
   process.env.NODE_ENV === 'production'
-    ? 'https://digilync.net,https://www.digilync.net'
-    : 'http://localhost:3000';
-const allowedOrigins = (process.env.FRONTEND_URL || defaultOrigins)
+    ? ['https://digilync.net', 'https://www.digilync.net']
+    : ['http://localhost:3000'];
+const allowedOrigins = (process.env.FRONTEND_URL || defaultOrigins.join(','))
   .split(',')
-  .map((o) => o.trim());
+  .map((o) => o.trim())
+  .filter(Boolean);
 const corsOptions = {
   origin: (origin, cb) => {
-    if (!origin || allowedOrigins.some((o) => origin === o || origin.startsWith(o))) {
+    // Allow requests with no origin (e.g. curl, Postman) or matching allowed list
+    if (!origin || allowedOrigins.includes(origin)) {
       cb(null, true);
     } else {
       cb(null, false);
     }
   },
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
   optionsSuccessStatus: 200,
 };
 app.use(cors(corsOptions));
