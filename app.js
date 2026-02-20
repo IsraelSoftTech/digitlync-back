@@ -41,6 +41,7 @@ app.get('/api/health', async (req, res) => {
 });
 
 // API routes (to be expanded per SRS modules)
+app.use('/api/auth', require('./routes/auth'));
 app.use('/api/farmers', require('./routes/farmers'));
 app.use('/api/providers', require('./routes/providers'));
 app.use('/api/bookings', require('./routes/bookings'));
