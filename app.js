@@ -54,5 +54,6 @@ app.use('/api/dashboard', require('./routes/dashboard'));
 app.use('/api/farmers', require('./routes/farmers'));
 app.use('/api/providers', require('./routes/providers'));
 app.use('/api/bookings', require('./routes/bookings'));
+app.use('/api/admin-ratings', require('./routes/admin-ratings'));
 
 module.exports = app;

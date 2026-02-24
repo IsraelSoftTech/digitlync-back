@@ -4,14 +4,14 @@ const { pool } = require('../config/db');
 
 // GET /api/farmers - list all farmers (with optional search)
 router.get('/', async (req, res) => {
-  const { search, village, crop } = req.query;
+  const { search, village, crop, region, district } = req.query;
   try {
     let query = 'SELECT * FROM farmers WHERE 1=1';
     const params = [];
     let i = 1;
 
     if (search) {
-      query += ` AND (full_name ILIKE $${i} OR phone ILIKE $${i} OR village ILIKE $${i})`;
+      query += ` AND (full_name ILIKE $${i} OR phone ILIKE $${i} OR village ILIKE $${i} OR region ILIKE $${i} OR district ILIKE $${i} OR crop_type ILIKE $${i})`;
       params.push(`%${search}%`);
       i++;
     }
@@ -23,6 +23,16 @@ router.get('/', async (req, res) => {
     if (crop) {
       query += ` AND crop_type ILIKE $${i}`;
       params.push(`%${crop}%`);
+      i++;
+    }
+    if (region) {
+      query += ` AND region ILIKE $${i}`;
+      params.push(`%${region}%`);
+      i++;
+    }
+    if (district) {
+      query += ` AND district ILIKE $${i}`;
+      params.push(`%${district}%`);
       i++;
     }
 
@@ -51,25 +61,31 @@ router.get('/:id', async (req, res) => {
 
 // POST /api/farmers - create farmer
 router.post('/', async (req, res) => {
-  const { full_name, phone, village, location, gps_lat, gps_lng, farm_size_ha, crop_type, notes } = req.body || {};
+  const { full_name, phone, country, region, division, subdivision, district, village, location, gps_lat, gps_lng, farm_size_ha, crop_type, service_needs, notes } = req.body || {};
   if (!full_name || !phone) {
     return res.status(400).json({ error: 'Full name and phone are required' });
   }
 
   try {
     const result = await pool.query(
-      `INSERT INTO farmers (full_name, phone, village, location, gps_lat, gps_lng, farm_size_ha, crop_type, notes)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      `INSERT INTO farmers (full_name, phone, country, region, division, subdivision, district, village, location, gps_lat, gps_lng, farm_size_ha, crop_type, service_needs, notes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
        RETURNING *`,
       [
         full_name.trim(),
         phone.trim(),
+        country?.trim() || null,
+        region?.trim() || null,
+        division?.trim() || null,
+        subdivision?.trim() || null,
+        district?.trim() || null,
         village?.trim() || null,
         location?.trim() || null,
         gps_lat != null ? parseFloat(gps_lat) : null,
         gps_lng != null ? parseFloat(gps_lng) : null,
         farm_size_ha != null ? parseFloat(farm_size_ha) : null,
         crop_type?.trim() || null,
+        Array.isArray(service_needs) && service_needs.length > 0 ? service_needs : null,
         notes?.trim() || null,
       ]
     );
@@ -82,7 +98,7 @@ router.post('/', async (req, res) => {
 
 // PUT /api/farmers/:id - update farmer
 router.put('/:id', async (req, res) => {
-  const { full_name, phone, village, location, gps_lat, gps_lng, farm_size_ha, crop_type, notes } = req.body || {};
+  const { full_name, phone, country, region, division, subdivision, district, village, location, gps_lat, gps_lng, farm_size_ha, crop_type, service_needs, notes } = req.body || {};
   if (!full_name || !phone) {
     return res.status(400).json({ error: 'Full name and phone are required' });
   }
@@ -90,19 +106,25 @@ router.put('/:id', async (req, res) => {
   try {
     const result = await pool.query(
       `UPDATE farmers SET
-        full_name = $1, phone = $2, village = $3, location = $4,
-        gps_lat = $5, gps_lng = $6, farm_size_ha = $7, crop_type = $8, notes = $9,
+        full_name = $1, phone = $2, country = $3, region = $4, division = $5, subdivision = $6, district = $7,
+        village = $8, location = $9, gps_lat = $10, gps_lng = $11, farm_size_ha = $12, crop_type = $13, service_needs = $14, notes = $15,
         updated_at = CURRENT_TIMESTAMP
-       WHERE id = $10 RETURNING *`,
+       WHERE id = $16 RETURNING *`,
       [
         full_name.trim(),
         phone.trim(),
+        country?.trim() || null,
+        region?.trim() || null,
+        division?.trim() || null,
+        subdivision?.trim() || null,
+        district?.trim() || null,
         village?.trim() || null,
         location?.trim() || null,
         gps_lat != null ? parseFloat(gps_lat) : null,
         gps_lng != null ? parseFloat(gps_lng) : null,
         farm_size_ha != null ? parseFloat(farm_size_ha) : null,
         crop_type?.trim() || null,
+        Array.isArray(service_needs) && service_needs.length > 0 ? service_needs : null,
         notes?.trim() || null,
         req.params.id,
       ]

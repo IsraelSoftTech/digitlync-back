@@ -29,7 +29,7 @@ router.get('/', async (req, res) => {
 router.get('/:id', async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT b.*, f.full_name AS farmer_name, f.phone AS farmer_phone, f.village AS farmer_village,
+      `SELECT b.*, f.full_name AS farmer_name, f.phone AS farmer_phone, f.village AS farmer_village, f.district AS farmer_district,
         p.full_name AS provider_name, p.phone AS provider_phone, p.services_offered
        FROM bookings b
        LEFT JOIN farmers f ON b.farmer_id = f.id
@@ -46,13 +46,13 @@ router.get('/:id', async (req, res) => {
 });
 
 router.post('/', async (req, res) => {
-  const { farmer_id, provider_id, service_type, scheduled_date, farm_size_ha, notes } = req.body || {};
+  const { farmer_id, provider_id, service_type, scheduled_date, scheduled_time, farm_size_ha, farm_produce_type, notes } = req.body || {};
   if (!farmer_id || !provider_id) return res.status(400).json({ error: 'Farmer and provider are required' });
   try {
     const result = await pool.query(
-      `INSERT INTO bookings (farmer_id, provider_id, service_type, status, scheduled_date, farm_size_ha, notes)
-       VALUES ($1, $2, $3, 'pending', $4, $5, $6) RETURNING *`,
-      [farmer_id, provider_id, service_type?.trim() || null, scheduled_date || null, farm_size_ha != null ? parseFloat(farm_size_ha) : null, notes?.trim() || null]
+      `INSERT INTO bookings (farmer_id, provider_id, service_type, status, scheduled_date, scheduled_time, farm_size_ha, farm_produce_type, notes)
+       VALUES ($1, $2, $3, 'pending', $4, $5, $6, $7, $8) RETURNING *`,
+      [farmer_id, provider_id, service_type?.trim() || null, scheduled_date || null, scheduled_time || null, farm_size_ha != null ? parseFloat(farm_size_ha) : null, farm_produce_type?.trim() || null, notes?.trim() || null]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
@@ -62,13 +62,14 @@ router.post('/', async (req, res) => {
 });
 
 router.put('/:id', async (req, res) => {
-  const { status, scheduled_date, farm_size_ha, notes } = req.body || {};
+  const { status, scheduled_date, scheduled_time, farm_size_ha, farm_produce_type, notes } = req.body || {};
   try {
     const result = await pool.query(
       `UPDATE bookings SET status=COALESCE($1, status), scheduled_date=COALESCE($2, scheduled_date),
-        farm_size_ha=COALESCE($3, farm_size_ha), notes=COALESCE($4, notes), updated_at=CURRENT_TIMESTAMP
-       WHERE id=$5 RETURNING *`,
-      [status || null, scheduled_date || null, farm_size_ha != null ? parseFloat(farm_size_ha) : null, notes !== undefined ? notes : null, req.params.id]
+        scheduled_time=COALESCE($3, scheduled_time), farm_size_ha=COALESCE($4, farm_size_ha),
+        farm_produce_type=COALESCE($5, farm_produce_type), notes=COALESCE($6, notes), updated_at=CURRENT_TIMESTAMP
+       WHERE id=$7 RETURNING *`,
+      [status || null, scheduled_date || null, scheduled_time || null, farm_size_ha != null ? parseFloat(farm_size_ha) : null, farm_produce_type !== undefined ? farm_produce_type : null, notes !== undefined ? notes : null, req.params.id]
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Booking not found' });
     res.json(result.rows[0]);
