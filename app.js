@@ -27,6 +27,7 @@ const corsOptions = {
 };
 app.use(cors(corsOptions));
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 // Health check (includes DB connectivity test)
 app.get('/api/health', async (req, res) => {
@@ -56,5 +57,6 @@ app.use('/api/providers', require('./routes/providers'));
 app.use('/api/bookings', require('./routes/bookings'));
 app.use('/api/admin-ratings', require('./routes/admin-ratings'));
 app.use('/api/public', require('./routes/public-metrics'));
+app.use('/api/whatsapp', require('./routes/whatsapp-webhook'));
 
 module.exports = app;
