@@ -41,10 +41,20 @@ app.get('/api/health', async (req, res) => {
   } catch (err) {
     db.error = err.message;
   }
+  const whatsapp = (() => {
+    try {
+      const { isEnabled } = require('./services/whatsapp-sender');
+      return isEnabled() ? 'configured' : 'not_configured';
+    } catch (_) {
+      return 'error';
+    }
+  })();
+
   res.json({
     status: 'ok',
     message: 'DigiLync API',
     db,
+    whatsapp,
     env: process.env.NODE_ENV || 'development',
   });
 });
