@@ -73,4 +73,20 @@ router.get('/metrics', async (req, res) => {
   }
 });
 
+// GET /api/public/locations - farmer locations with GPS for public map (no auth)
+router.get('/locations', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT id, full_name, village, gps_lat, gps_lng
+      FROM farmers
+      WHERE gps_lat IS NOT NULL AND gps_lng IS NOT NULL
+      ORDER BY created_at DESC
+    `);
+    res.json({ locations: result.rows });
+  } catch (err) {
+    console.error('Public locations error:', err);
+    res.status(500).json({ error: 'Failed to fetch locations' });
+  }
+});
+
 module.exports = router;
