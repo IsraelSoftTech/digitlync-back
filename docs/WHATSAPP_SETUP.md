@@ -108,7 +108,28 @@ For sandbox, `TWILIO_WHATSAPP_FROM` is usually `whatsapp:+14155238886`. For What
 
 After sending a message, check your server logs. You should see:
 
-- `[WhatsApp] Incoming: { from: '***4383', bodyLen: 2 }` → Twilio reached your server
+- `[WhatsApp] POST /webhook received` → Request reached your server (first thing to look for)
+- `[WhatsApp] Incoming: { from: '***4383', bodyLen: 2 }` → Message parsed correctly
 - `[WhatsApp] Reply sent to ***4383` → Reply was sent
 
-If you see nothing, Twilio is not reaching your webhook (wrong URL, firewall, or SSL issue).
+**If you see nothing** → Twilio is not reaching your webhook. Check:
+- Webhook URL in Twilio Console (exact path: `/api/whatsapp/webhook`, method: POST)
+- Your API is publicly reachable (use ngrok for local dev)
+- No firewall/SSL issues blocking Twilio
+
+**If you see "POST /webhook received" but no reply** → Check for:
+- `Missing From and WaId` → Twilio sent unexpected payload; check `bodyKeys` in logs
+- `Twilio not configured` → Set env vars in your deployment
+- `Webhook error` → Check the error stack trace; often DB connection or Twilio API issue
+
+### 6. Test webhook manually (curl)
+
+To verify your server receives POSTs correctly:
+
+```bash
+curl -X POST "https://api.digilync.net/api/whatsapp/webhook" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "From=whatsapp:+237675644383&Body=hi"
+```
+
+You should see `[WhatsApp] POST /webhook received` in logs. If the bot is configured, it will try to reply (may fail for non-sandbox numbers).
