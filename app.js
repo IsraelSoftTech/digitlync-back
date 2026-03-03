@@ -22,7 +22,7 @@ const corsOptions = {
     }
   },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Admin-Id', 'X-Admin-Username'],
   optionsSuccessStatus: 200,
 };
 app.use(cors(corsOptions));
@@ -66,6 +66,7 @@ app.use('/api/farmers', require('./routes/farmers'));
 app.use('/api/providers', require('./routes/providers'));
 app.use('/api/bookings', require('./routes/bookings'));
 app.use('/api/admin-ratings', require('./routes/admin-ratings'));
+app.use('/api/audit-logs', require('./routes/audit-logs'));
 app.use('/api/public', require('./routes/public-metrics'));
 app.use('/api/whatsapp', require('./routes/whatsapp-webhook'));
 

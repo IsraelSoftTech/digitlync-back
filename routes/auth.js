@@ -1,6 +1,7 @@
 const express = require('express');
 const crypto = require('crypto');
 const { pool } = require('../config/db');
+const { logAudit } = require('../services/audit-log');
 
 const router = express.Router();
 
@@ -26,6 +27,7 @@ router.post('/login', async (req, res) => {
     }
 
     const admin = result.rows[0];
+    await logAudit({ adminId: admin.id, adminUsername: admin.username, actionType: 'login', action: `Admin logged in: ${admin.username}` });
     res.json({
       success: true,
       admin: { id: admin.id, username: admin.username },

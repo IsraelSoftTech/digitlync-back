@@ -38,7 +38,31 @@ npm install
    - **URL**: `https://your-api-domain.com/api/whatsapp/webhook`
    - **Method**: POST
 
-For local development, use [ngrok](https://ngrok.com) to expose your local server:
+### Local testing without Twilio/ngrok (simulator)
+
+You can test the full conversation flow locally **without** Twilio or ngrok:
+
+```bash
+# 1. Start the backend
+npm run dev
+
+# 2. In another terminal, run the test script
+npm run test:whatsapp
+```
+
+Or test manually with curl:
+
+```bash
+curl -X POST http://localhost:5000/api/whatsapp/simulate \
+  -H "Content-Type: application/json" \
+  -d '{"from":"whatsapp:+237675644383","body":"hi"}'
+```
+
+The simulator returns the bot's reply in JSON: `{"reply":"...","from":"..."}`. No real WhatsApp messages are sent.
+
+### Local testing with real WhatsApp (ngrok)
+
+For local development with real WhatsApp, use [ngrok](https://ngrok.com) to expose your local server:
 
 ```bash
 ngrok http 5000

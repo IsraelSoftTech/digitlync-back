@@ -10,7 +10,10 @@
     "seed:farmers": "node scripts/seed-farmers.js",
     "seed:providers": "node scripts/seed-providers.js",
     "seed:bookings": "node scripts/seed-bookings.js",
-    "migrate:whatsapp": "node scripts/migrate-whatsapp-sessions.js"
+    "migrate:whatsapp": "node scripts/migrate-whatsapp-sessions.js",
+    "migrate:audit": "node scripts/migrate-audit-logs.js",
+    "test:whatsapp": "node scripts/test-whatsapp-simulator.js",
+    "tunnel": "npx localtunnel --port 5000"
   },
   "dependencies": {
     "cors": "^2.8.5",

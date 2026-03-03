@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { pool } = require('../config/db');
+const { logAudit, getAdminFromRequest } = require('../services/audit-log');
 
 router.get('/', async (req, res) => {
   const { status } = req.query;
@@ -54,7 +55,10 @@ router.post('/', async (req, res) => {
        VALUES ($1, $2, $3, 'pending', $4, $5, $6, $7, $8) RETURNING *`,
       [farmer_id, provider_id, service_type?.trim() || null, scheduled_date || null, scheduled_time || null, farm_size_ha != null ? parseFloat(farm_size_ha) : null, farm_produce_type?.trim() || null, notes?.trim() || null]
     );
-    res.status(201).json(result.rows[0]);
+    const booking = result.rows[0];
+    const { adminId, adminUsername } = getAdminFromRequest(req);
+    await logAudit({ adminId, adminUsername, actionType: 'booking', action: `Booking created: farmer ${farmer_id} → provider ${provider_id} (ID ${booking.id})`, entityType: 'booking', entityId: booking.id });
+    res.status(201).json(booking);
   } catch (err) {
     console.error('Booking create error:', err);
     res.status(500).json({ error: 'Failed to create booking' });
@@ -72,7 +76,11 @@ router.put('/:id', async (req, res) => {
       [status || null, scheduled_date || null, scheduled_time || null, farm_size_ha != null ? parseFloat(farm_size_ha) : null, farm_produce_type !== undefined ? farm_produce_type : null, notes !== undefined ? notes : null, req.params.id]
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Booking not found' });
-    res.json(result.rows[0]);
+    const booking = result.rows[0];
+    const { adminId, adminUsername } = getAdminFromRequest(req);
+    const statusMsg = status ? ` status changed to ${status}` : ' updated';
+    await logAudit({ adminId, adminUsername, actionType: 'booking', action: `Booking${statusMsg} (ID ${booking.id})`, entityType: 'booking', entityId: booking.id });
+    res.json(booking);
   } catch (err) {
     console.error('Booking update error:', err);
     res.status(500).json({ error: 'Failed to update booking' });
@@ -83,6 +91,8 @@ router.delete('/:id', async (req, res) => {
   try {
     const result = await pool.query('DELETE FROM bookings WHERE id = $1 RETURNING id', [req.params.id]);
     if (result.rows.length === 0) return res.status(404).json({ error: 'Booking not found' });
+    const { adminId, adminUsername } = getAdminFromRequest(req);
+    await logAudit({ adminId, adminUsername, actionType: 'booking', action: `Booking deleted (ID ${req.params.id})`, entityType: 'booking', entityId: parseInt(req.params.id, 10) });
     res.json({ success: true });
   } catch (err) {
     console.error('Booking delete error:', err);

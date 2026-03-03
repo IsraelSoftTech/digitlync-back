@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { pool } = require('../config/db');
+const { logAudit, getAdminFromRequest } = require('../services/audit-log');
 
 router.get('/', async (req, res) => {
   const { search } = req.query;
@@ -65,6 +66,8 @@ router.post('/', async (req, res) => {
         await insertProviderService(client, provider.id, svc);
       }
     }
+    const { adminId, adminUsername } = getAdminFromRequest(req);
+    await logAudit({ adminId, adminUsername, actionType: 'data_edit', action: `Provider created: ${provider.full_name} (ID ${provider.id})`, entityType: 'provider', entityId: provider.id });
     res.status(201).json(provider);
   } catch (err) {
     console.error('Provider create error:', err);
@@ -98,6 +101,8 @@ router.put('/:id', async (req, res) => {
       }
     }
 
+    const { adminId, adminUsername } = getAdminFromRequest(req);
+    await logAudit({ adminId, adminUsername, actionType: 'data_edit', action: `Provider profile updated: ${provider.full_name} (ID ${provider.id})`, entityType: 'provider', entityId: provider.id });
     client.release();
     res.json(provider);
   } catch (err) {
@@ -126,8 +131,12 @@ async function insertProviderService(client, providerId, svc) {
 
 router.delete('/:id', async (req, res) => {
   try {
+    const getResult = await pool.query('SELECT full_name FROM providers WHERE id = $1', [req.params.id]);
     const result = await pool.query('DELETE FROM providers WHERE id = $1 RETURNING id', [req.params.id]);
     if (result.rows.length === 0) return res.status(404).json({ error: 'Provider not found' });
+    const name = getResult.rows[0]?.full_name || 'Unknown';
+    const { adminId, adminUsername } = getAdminFromRequest(req);
+    await logAudit({ adminId, adminUsername, actionType: 'data_edit', action: `Provider deleted: ${name} (ID ${req.params.id})`, entityType: 'provider', entityId: parseInt(req.params.id, 10) });
     res.json({ success: true });
   } catch (err) {
     console.error('Provider delete error:', err);

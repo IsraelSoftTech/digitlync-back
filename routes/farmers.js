@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { pool } = require('../config/db');
+const { logAudit, getAdminFromRequest } = require('../services/audit-log');
 
 // GET /api/farmers - list all farmers (with optional search)
 router.get('/', async (req, res) => {
@@ -89,7 +90,10 @@ router.post('/', async (req, res) => {
         notes?.trim() || null,
       ]
     );
-    res.status(201).json(result.rows[0]);
+    const farmer = result.rows[0];
+    const { adminId, adminUsername } = getAdminFromRequest(req);
+    await logAudit({ adminId, adminUsername, actionType: 'data_edit', action: `Farmer created: ${farmer.full_name} (ID ${farmer.id})`, entityType: 'farmer', entityId: farmer.id });
+    res.status(201).json(farmer);
   } catch (err) {
     console.error('Farmer create error:', err);
     res.status(500).json({ error: 'Failed to create farmer' });
@@ -132,7 +136,10 @@ router.put('/:id', async (req, res) => {
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Farmer not found' });
     }
-    res.json(result.rows[0]);
+    const farmer = result.rows[0];
+    const { adminId, adminUsername } = getAdminFromRequest(req);
+    await logAudit({ adminId, adminUsername, actionType: 'data_edit', action: `Farmer profile updated: ${farmer.full_name} (ID ${farmer.id})`, entityType: 'farmer', entityId: farmer.id });
+    res.json(farmer);
   } catch (err) {
     console.error('Farmer update error:', err);
     res.status(500).json({ error: 'Failed to update farmer' });
@@ -142,10 +149,14 @@ router.put('/:id', async (req, res) => {
 // DELETE /api/farmers/:id
 router.delete('/:id', async (req, res) => {
   try {
+    const getResult = await pool.query('SELECT full_name FROM farmers WHERE id = $1', [req.params.id]);
     const result = await pool.query('DELETE FROM farmers WHERE id = $1 RETURNING id', [req.params.id]);
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Farmer not found' });
     }
+    const name = getResult.rows[0]?.full_name || 'Unknown';
+    const { adminId, adminUsername } = getAdminFromRequest(req);
+    await logAudit({ adminId, adminUsername, actionType: 'data_edit', action: `Farmer deleted: ${name} (ID ${req.params.id})`, entityType: 'farmer', entityId: parseInt(req.params.id, 10) });
     res.json({ success: true });
   } catch (err) {
     console.error('Farmer delete error:', err);
