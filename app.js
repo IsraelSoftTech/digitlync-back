@@ -68,6 +68,7 @@ app.use('/api/bookings', require('./routes/bookings'));
 app.use('/api/admin-ratings', require('./routes/admin-ratings'));
 app.use('/api/audit-logs', require('./routes/audit-logs'));
 app.use('/api/public', require('./routes/public-metrics'));
+app.use('/api/farm-plots', require('./routes/farm-plots'));
 app.use('/api/whatsapp', require('./routes/whatsapp-webhook'));
 
 module.exports = app;

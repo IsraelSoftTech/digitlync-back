@@ -3,6 +3,23 @@ const router = express.Router();
 const { pool } = require('../config/db');
 const { logAudit, getAdminFromRequest } = require('../services/audit-log');
 
+// GET /api/farmers/map-data - farmers + farm_plots for admin map (multiple plots supported)
+router.get('/map-data', async (req, res) => {
+  try {
+    const farmersRes = await pool.query('SELECT id, full_name, village, region, district, gps_lat, gps_lng, crop_type, phone FROM farmers');
+    let plotsRes = { rows: [] };
+    try {
+      plotsRes = await pool.query('SELECT id, farmer_id, gps_lat, gps_lng, plot_name, plot_size_ha, crop_type FROM farm_plots');
+    } catch (_) {
+      // farm_plots table may not exist yet
+    }
+    res.json({ farmers: farmersRes.rows, plots: plotsRes.rows });
+  } catch (err) {
+    console.error('Map data error:', err);
+    res.status(500).json({ error: 'Failed to fetch map data' });
+  }
+});
+
 // GET /api/farmers - list all farmers (with optional search)
 router.get('/', async (req, res) => {
   const { search, village, crop, region, district } = req.query;
