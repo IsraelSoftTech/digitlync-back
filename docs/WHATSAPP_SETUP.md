@@ -94,18 +94,20 @@ Then set the webhook to: `https://xxxx.ngrok.io/api/whatsapp/webhook`
 
 ### 1. Check webhook is configured in Twilio
 
-1. Go to [Twilio Console](https://console.twilio.com) → **Messaging** → **Try it out** → **Send a WhatsApp message**
-2. Find **"When a message comes in"** webhook
-3. Set URL to: `https://api.digilync.net/api/whatsapp/webhook` (or your deployed API URL)
+1. Go to [Twilio Console](https://console.twilio.com) → **Messaging** → **Try it out** → **Send a WhatsApp message** (or [WhatsApp Sandbox](https://console.twilio.com/us1/develop/sms/try-it-out/whatsapp-learn))
+2. Under **Sandbox configuration**, find **"When a message comes in"**
+3. Set URL to: `https://digitlync-back.onrender.com/api/whatsapp/webhook` (use the URL where Twilio env vars are set)
 4. Method: **POST**
 5. Save
 
+**Important:** The webhook must point to the server that has `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, and `TWILIO_WHATSAPP_FROM` set. If your backend runs on Render, use `digitlync-back.onrender.com`; if `api.digilync.net` has those env vars, use that instead.
+
 ### 2. Verify your API receives the webhook
 
-Visit: `https://api.digilync.net/api/whatsapp/webhook` (GET)
+Visit: `https://digitlync-back.onrender.com/api/whatsapp/webhook` (GET)
 
-- If you see `"whatsapp": "configured"` → Twilio credentials are set
-- If you see `"whatsapp": "not_configured"` → Add `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_WHATSAPP_FROM` to your production environment
+- If you see `"whatsapp": "configured"` → Twilio credentials are set on that server
+- If you see `"whatsapp": "not_configured"` → Add `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_WHATSAPP_FROM` to that deployment's environment variables
 
 ### 3. Twilio WhatsApp Sandbox – join first
 

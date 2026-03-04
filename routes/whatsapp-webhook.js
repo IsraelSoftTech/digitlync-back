@@ -1,6 +1,8 @@
 /**
  * Twilio WhatsApp webhook - receives incoming messages
- * Configure this URL in Twilio Console: https://api.digilync.net/api/whatsapp/webhook
+ * Configure in Twilio Console → Messaging → WhatsApp Sandbox → Sandbox configuration
+ * Webhook URL: https://digitlync-back.onrender.com/api/whatsapp/webhook (or https://api.digilync.net if env vars are set there)
+ * Method: POST
  */
 const express = require('express');
 const router = express.Router();
@@ -60,7 +62,8 @@ router.post('/webhook', async (req, res) => {
     } else {
       console.log('[WhatsApp] No reply to send (handleIncoming returned null)');
     }
-    res.status(200).send();
+    // Twilio expects TwiML or 200; empty <Response/> acknowledges receipt (we reply via REST API)
+    res.type('text/xml').send('<Response></Response>');
   } catch (err) {
     console.error('[WhatsApp] Webhook error:', err);
     console.error('[WhatsApp] Stack:', err.stack);
@@ -69,7 +72,7 @@ router.post('/webhook', async (req, res) => {
     } catch (e) {
       console.error('Failed to send error reply:', e);
     }
-    res.status(500).send();
+    res.type('text/xml').status(500).send('<Response></Response>');
   }
 });
 
