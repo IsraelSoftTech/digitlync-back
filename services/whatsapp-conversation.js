@@ -231,15 +231,21 @@ async function handleFarmerRequestStep(waFrom, session, data, text, existing) {
       const ha = parseFloat(text);
       if (isNaN(ha) || ha < 0) return 'Please enter a valid number (e.g. 2.5).';
       await updateSession(waFrom, { step: 'request_date', data: { ...data, farm_size_ha: ha } });
-      return 'What is your *preferred date*? Reply in format YYYY-MM-DD (e.g. 2025-03-15)';
+      return 'What is your *preferred date*? Reply in format YYYY-MM-DD (e.g. 2026-03-15)';
     }
 
     case 'request_date': {
       const dateStr = text.trim();
       const dateMatch = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-      if (!dateMatch) return 'Please use format YYYY-MM-DD (e.g. 2025-03-15).';
-      const d = new Date(dateStr);
-      if (isNaN(d.getTime()) || d < new Date()) return 'Please enter a valid future date.';
+      if (!dateMatch) return 'Please use format YYYY-MM-DD (e.g. 2026-03-15).';
+      const year = parseInt(dateMatch[1], 10);
+      const month = parseInt(dateMatch[2], 10) - 1;
+      const day = parseInt(dateMatch[3], 10);
+      const d = new Date(Date.UTC(year, month, day));
+      if (isNaN(d.getTime())) return 'Please enter a valid date.';
+      const now = new Date();
+      const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+      if (d < today) return 'Please enter a valid future date (today or later).';
       await updateSession(waFrom, { step: 'request_confirm', data: { ...data, scheduled_date: dateStr } });
       return (
         '📋 *Confirm your request:*\n\n' +
