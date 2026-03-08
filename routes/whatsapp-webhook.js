@@ -43,7 +43,15 @@ router.post('/webhook', async (req, res) => {
   res.status(200).send();
 
   const body = req.body;
+  // Log every POST to debug - Meta sends messages, status updates, etc.
+  console.log('[WhatsApp] POST received', {
+    object: body?.object,
+    entryCount: body?.entry?.length ?? 0,
+    fields: body?.entry?.map((e) => e.changes?.map((c) => c.field)).flat().filter(Boolean) ?? [],
+  });
+
   if (!body || body.object !== 'whatsapp_business_account') {
+    console.warn('[WhatsApp] Ignoring webhook - object:', body?.object);
     return;
   }
 
