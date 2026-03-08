@@ -260,11 +260,24 @@ async function handleFarmerRequestStep(waFrom, session, data, text, existing) {
       if (['yes', 'y'].includes(text.toLowerCase())) {
         const providers = await findMatchingProviders(data.service_type);
         if (providers.length === 0) {
-          await updateSession(waFrom, { step: 'welcome', data: {} });
-          return (
-            'No providers available for *' + data.service_type + '* at the moment.\n\n' +
-            'An admin will contact you. You can also reply *MENU* for options.'
-          );
+          // Create booking without provider - admin will assign
+          try {
+            const ins = await pool.query(
+              `INSERT INTO bookings (farmer_id, provider_id, service_type, status, scheduled_date, farm_size_ha)
+               VALUES ($1, NULL, $2, 'pending', $3, $4) RETURNING id`,
+              [existing.id, data.service_type, data.scheduled_date, data.farm_size_ha]
+            );
+            await updateSession(waFrom, { step: 'welcome', data: {} });
+            return (
+              '✅ *Request received!*\n\n' +
+              'No providers were automatically matched for *' + data.service_type + '*.\n\n' +
+              'An admin will assign a provider soon and you will be notified.\n\n' +
+              'Reply *MENU* for options.'
+            );
+          } catch (err) {
+            console.error('Booking create (no provider) error:', err);
+            return 'Sorry, the request could not be submitted. Please try again or contact support.';
+          }
         }
         const provider = providers[0];
         try {
