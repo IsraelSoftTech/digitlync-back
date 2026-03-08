@@ -104,23 +104,26 @@ router.post('/webhook', async (req, res) => {
         });
 
         if (!isEnabled()) {
-          console.warn('[WhatsApp] Meta not configured - set META_WHATSAPP_ACCESS_TOKEN, META_WHATSAPP_PHONE_NUMBER_ID');
+          console.warn('[WhatsApp] Meta not configured - set META_WHATSAPP_ACCESS_TOKEN, META_WHATSAPP_PHONE_NUMBER_ID in Render Environment');
           continue;
         }
 
         try {
           const reply = await handleIncoming(waFrom, text, latitude, longitude, profileName);
           if (reply) {
+            console.log('[WhatsApp] Sending reply to', '***' + String(from).slice(-4), 'len:', reply.length);
             await sendText(waFrom, reply);
             console.log('[WhatsApp] Reply sent to', '***' + String(from).slice(-4));
+          } else {
+            console.log('[WhatsApp] No reply to send (handleIncoming returned null)');
           }
         } catch (err) {
-          console.error('[WhatsApp] Webhook error:', err);
-          console.error('[WhatsApp] Stack:', err.stack);
+          console.error('[WhatsApp] Webhook error:', err.message);
+          console.error('[WhatsApp] Full error:', err);
           try {
             await sendText(waFrom, 'Sorry, something went wrong. Please try again later.');
           } catch (e) {
-            console.error('Failed to send error reply:', e);
+            console.error('[WhatsApp] Failed to send error reply:', e.message);
           }
         }
       }

@@ -47,10 +47,13 @@ async function sendText(to, body) {
 
   if (!res.ok) {
     const errBody = await res.text();
+    console.error('[WhatsApp] Meta API error', res.status, errBody);
     throw new Error(`Meta WhatsApp API error ${res.status}: ${errBody}`);
   }
 
-  return res.json();
+  const data = await res.json();
+  console.log('[WhatsApp] Message sent successfully to', phone);
+  return data;
 }
 
 /**
