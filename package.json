@@ -12,6 +12,7 @@
     "seed:bookings": "node scripts/seed-bookings.js",
     "migrate:whatsapp": "node scripts/migrate-whatsapp-sessions.js",
     "migrate:audit": "node scripts/migrate-audit-logs.js",
+    "migrate:phase1": "node scripts/migrate-phase1-data-model.js",
     "test:whatsapp": "node scripts/test-whatsapp-simulator.js",
     "tunnel": "npx localtunnel --port 5000"
   },
