@@ -3,7 +3,7 @@ const cors = require('cors');
 
 const app = express();
 
-// CORS: allow frontend (localhost:3000 in dev, digilync.net + Render in prod)
+// CORS: allow frontend (localhost:3000 in dev, digilync.net in prod)
 const defaultOrigins =
   process.env.NODE_ENV === 'production'
     ? ['https://digilync.net', 'https://www.digilync.net', 'https://digitlync-front.onrender.com']

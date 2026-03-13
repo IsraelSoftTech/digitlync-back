@@ -36,7 +36,7 @@ npm install
 
 1. Go to [Meta for Developers](https://developers.facebook.com) → Your App → **WhatsApp** → **Configuration**
 2. Under **Webhook**, click **Edit**
-3. **Callback URL**: `https://digitlync-back.onrender.com/api/whatsapp/webhook`
+3. **Callback URL**: `https://api.digilync.net/api/whatsapp/webhook`
 4. **Verify Token**: `digilync-webhook-verify` (must match `META_WHATSAPP_VERIFY_TOKEN` in your `.env`)
 5. **Fallback URL**: Same as Callback URL
 6. Subscribe to **messages** webhook field
@@ -105,13 +105,13 @@ Then set the webhook Callback URL in Meta to: `https://xxxx.ngrok.io/api/whatsap
 ### 1. Check webhook is configured in Meta
 
 1. Go to [Meta for Developers](https://developers.facebook.com) → Your App → **WhatsApp** → **Configuration**
-2. Webhook Callback URL: `https://digitlync-back.onrender.com/api/whatsapp/webhook`
+2. Webhook Callback URL: `https://api.digilync.net/api/whatsapp/webhook`
 3. Verify Token must match `META_WHATSAPP_VERIFY_TOKEN` in your `.env`
 4. Ensure **messages** is subscribed
 
 ### 2. Verify your API receives the webhook
 
-Visit: `https://digitlync-back.onrender.com/api/whatsapp/webhook` (GET)
+Visit: `https://api.digilync.net/api/whatsapp/webhook` (GET)
 
 - If you see `"whatsapp": "configured"` → Meta credentials are set on that server
 - If you see `"whatsapp": "not_configured"` → Add `META_WHATSAPP_ACCESS_TOKEN` and `META_WHATSAPP_PHONE_NUMBER_ID` to your deployment
