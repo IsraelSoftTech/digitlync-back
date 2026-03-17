@@ -35,7 +35,8 @@ router.get('/:id', async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT b.*, f.full_name AS farmer_name, f.phone AS farmer_phone, f.village AS farmer_village, f.district AS farmer_district,
-        p.full_name AS provider_name, p.phone AS provider_phone, p.services_offered
+        p.full_name AS provider_name, p.phone AS provider_phone, p.services_offered,
+        p.base_price_per_ha, p.work_capacity_ha_per_hour
        FROM bookings b
        LEFT JOIN farmers f ON b.farmer_id = f.id
        LEFT JOIN providers p ON b.provider_id = p.id

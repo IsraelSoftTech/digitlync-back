@@ -3,13 +3,31 @@ const router = express.Router();
 const { pool } = require('../config/db');
 const { logAudit, getAdminFromRequest } = require('../services/audit-log');
 
-// GET /api/providers/map-data - providers with GPS for admin map
+// Default location for providers without GPS (Benin center) - so they appear on map and can be dragged to set
+const DEFAULT_PROVIDER_LAT = 6.3703;
+const DEFAULT_PROVIDER_LNG = 2.3912;
+
+// GET /api/providers/map-data - all providers for admin map (uses default coords if no GPS so they can be pinned/dragged)
 router.get('/map-data', async (req, res) => {
   try {
     const result = await pool.query(
-      'SELECT id, full_name, phone, services_offered, gps_lat, gps_lng, service_radius_km FROM providers WHERE gps_lat IS NOT NULL AND gps_lng IS NOT NULL'
+      `SELECT p.id, p.full_name, p.phone, p.services_offered, p.gps_lat, p.gps_lng, p.service_radius_km,
+              p.base_price_per_ha, p.work_capacity_ha_per_hour,
+              (SELECT ROUND(AVG(fr.rating)::numeric, 1) FROM farmer_ratings fr WHERE fr.provider_id = p.id) AS avg_rating
+       FROM providers p`
     );
-    res.json({ providers: result.rows });
+    const providers = result.rows.map((p, i) => {
+      const hasGps = p.gps_lat != null && p.gps_lng != null;
+      const offsetLat = hasGps ? 0 : (i % 5) * 0.015;
+      const offsetLng = hasGps ? 0 : (Math.floor(i / 5) % 5) * 0.015;
+      return {
+        ...p,
+        gps_lat: hasGps ? p.gps_lat : DEFAULT_PROVIDER_LAT + offsetLat,
+        gps_lng: hasGps ? p.gps_lng : DEFAULT_PROVIDER_LNG + offsetLng,
+        _has_gps: hasGps,
+      };
+    });
+    res.json({ providers });
   } catch (err) {
     console.error('Providers map data error:', err);
     res.status(500).json({ error: 'Failed to fetch providers map data' });
