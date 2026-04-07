@@ -42,18 +42,31 @@ async function checkBackend() {
 }
 
 async function run() {
-  // Use unique phone per run so we always test registration (not main menu for existing user)
+  // Unique phone per run so we always exercise full registration (not main menu for existing user)
   const suffix = (Date.now() % 100000).toString().padStart(5, '0');
   const from = `whatsapp:+2376756${suffix}`;
   const steps = [
-    { body: 'hi', desc: 'Welcome message' },
-    { body: '1', desc: 'Choose Farmer' },
-    { body: 'John Doe', desc: 'Farmer name' },
-    { body: 'Buea', desc: 'Village' },
-    { body: '2.5', desc: 'Farm size' },
-    { body: 'maize', desc: 'Crop' },
-    { body: 'skip', desc: 'Skip location' },
-    { body: 'yes', desc: 'Confirm registration' },
+    { body: 'hi', desc: 'Welcome / main menu' },
+    { body: '1', desc: 'Register as Farmer' },
+    {
+      body:
+        'Name: Simulator Farmer\n' +
+        'Region: South West\n' +
+        'Division: Meme\n' +
+        'Subdivision: Kumba\n' +
+        'District: Kumba 1',
+      desc: 'Structured location (farmer_basic)',
+    },
+    { body: '1', desc: 'Choose decimal lat/lng' },
+    { body: '4.6382, 9.4469', desc: 'GPS coordinates' },
+    { body: '1', desc: 'Confirm GPS' },
+    {
+      body: 'Farm size: 2.5\nCrop: Maize\nServices: 1,3',
+      desc: 'Farm details (size, crop, services)',
+    },
+    { body: '2', desc: 'No additional farm' },
+    { body: 'yes', desc: 'Confirm registration (synonym for 1)' },
+    { body: '1', desc: 'Privacy consent Agree' },
   ];
 
   console.log('Testing WhatsApp bot via simulator at', BASE);
@@ -68,7 +81,8 @@ async function run() {
   for (const step of steps) {
     try {
       const { reply } = await post({ from, body: step.body });
-      console.log(`[${step.desc}] "${step.body}"`);
+      console.log(`[${step.desc}]`);
+      console.log(`  send: ${JSON.stringify(step.body).slice(0, 120)}${step.body.length > 120 ? '…' : ''}`);
       console.log(`  → ${(reply || '(no reply)').split('\n')[0]}`);
       console.log('');
     } catch (err) {
@@ -79,7 +93,7 @@ async function run() {
   }
 
   console.log('---');
-  console.log('All steps passed. Bot is working locally.');
+  console.log('All steps passed. Farmer registration flow completed locally.');
 }
 
 run();

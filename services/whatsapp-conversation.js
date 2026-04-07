@@ -352,27 +352,35 @@ async function handleIncoming(waFrom, body, latitude, longitude, profileName) {
     }
   }
 
-  // Unregistered: handle menu
+  // Unregistered: main-menu shortcuts only (do not steal "1"/"2" while mid-registration)
   if (!existing) {
-    if (text === '1') {
-      await updateSession(waFrom, { user_type: 'farmer', step: 'farmer_basic', data: {} });
-      return getFarmerBasicMessage();
-    }
-    if (text === '2') {
-      await updateSession(waFrom, { user_type: 'provider', step: 'provider_batched', data: {} });
-      return getProviderBatchedMessage();
-    }
-    if (text === '3') {
-      return 'Please register as a farmer first (reply *1*). Reply *MENU* for options.';
-    }
-    if (text === '4') {
-      return 'Please register first. Reply *1* for Farmer or *2* for Provider.';
-    }
-    if (text === '6') {
-      return 'You are not registered. Reply *1* for Farmer or *2* for Provider to register.';
-    }
-    if (text === '7') {
-      return 'Please register first to view your data. Reply *1* for Farmer or *2* for Provider.';
+    const inOnboarding =
+      session.step &&
+      (session.step.startsWith('farmer_') ||
+        session.step.startsWith('provider_') ||
+        session.step.startsWith('request_') ||
+        session.step === 'add_farm_details');
+    if (!inOnboarding) {
+      if (text === '1') {
+        await updateSession(waFrom, { user_type: 'farmer', step: 'farmer_basic', data: {} });
+        return getFarmerBasicMessage();
+      }
+      if (text === '2') {
+        await updateSession(waFrom, { user_type: 'provider', step: 'provider_batched', data: {} });
+        return getProviderBatchedMessage();
+      }
+      if (text === '3') {
+        return 'Please register as a farmer first (reply *1*). Reply *MENU* for options.';
+      }
+      if (text === '4') {
+        return 'Please register first. Reply *1* for Farmer or *2* for Provider.';
+      }
+      if (text === '6') {
+        return 'You are not registered. Reply *1* for Farmer or *2* for Provider to register.';
+      }
+      if (text === '7') {
+        return 'Please register first to view your data. Reply *1* for Farmer or *2* for Provider.';
+      }
     }
   }
 
@@ -732,9 +740,10 @@ async function handleFarmerFlow(waFrom, session, data, text, latitude, longitude
 
 function getFarmerFarmDetailsMessage() {
   return (
-    'Now enter your farm details:\n\n' +
-    'Farm size (hectares):\n' +
-    'Crop(s):\n\n' +
+    'Now enter your farm details (use the labels below):\n\n' +
+    'Farm size:\n' +
+    'Crop:\n' +
+    'Services:\n\n' +
     'Select services needed (reply with numbers separated by comma):\n\n' +
     '1. Ploughing\n2. Planting\n3. Spraying\n4. Irrigation\n5. Harvesting\n' +
     '6. Processing\n7. Storage\n8. Transport\n9. Other\n\n' +
@@ -795,6 +804,7 @@ async function handleProviderFlow(waFrom, session, data, text, latitude, longitu
     const capacity = parseFloat(kv.capacity || kv.work_capacity || '');
     if (isNaN(radius) || radius < 0) return 'Please include *Radius:* (km). Example: Radius: 10';
     if (isNaN(price) || price < 0) return 'Please include *Price:* (FCFA/ha). Example: Price: 12000';
+    if (isNaN(capacity) || capacity < 0) return 'Please include *Capacity:* (hectares per day). Example: Capacity: 3';
     const serviceNums = (kv.services || '').replace(/[^\d,]/g, '').split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => !isNaN(n) && n >= 1 && n <= 9);
     const services = serviceNums.map((n) => SERVICE_LIST[n - 1]).filter(Boolean);
     let gpsLat = data.gps_lat;
@@ -809,7 +819,7 @@ async function handleProviderFlow(waFrom, session, data, text, latitude, longitu
         gpsLng = parseFloat(coordMatch[2]);
       }
     }
-    const haPerHour = isNaN(capacity) ? null : capacity / 8;
+    const haPerHour = capacity / 8;
     try {
       const ins = await pool.query(
         `INSERT INTO providers (full_name, phone, services_offered, work_capacity_ha_per_hour, base_price_per_ha, service_radius_km, gps_lat, gps_lng)
@@ -865,17 +875,18 @@ async function handleRequestFlow(waFrom, session, data, text, latitude, longitud
         return `Reply with a number from 1 to ${farms.length}.\n\n` + getRequestSelectFarmMessage(farms);
       }
       const farm = farms[num - 1];
+      const selectedFarmSize = farm.plot_size_ha ?? farm.farm_size_ha;
       await updateSession(waFrom, {
         step: 'request_input',
         data: {
           farmer_id: existing.id,
           farm_plot_id: farm.id,
-          farm_size_ha: farm.plot_size_ha ?? farm.farm_size_ha,
+          farm_size_ha: selectedFarmSize,
           farm_gps_lat: farm.gps_lat,
           farm_gps_lng: farm.gps_lng,
         },
       });
-      return getRequestInputMessage(data);
+      return getRequestInputMessage({ farm_size_ha: selectedFarmSize });
     }
 
     case 'request_input': {
