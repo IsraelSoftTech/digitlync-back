@@ -52,7 +52,7 @@ app.get('/api/health', async (req, res) => {
 
   res.json({
     status: 'ok',
-    message: 'Farmfleet API',
+    message: 'Digilync API',
     db,
     whatsapp,
     env: process.env.NODE_ENV || 'development',

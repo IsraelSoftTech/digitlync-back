@@ -1,7 +1,7 @@
 {
   "name": "digilync-backend",
   "version": "0.1.0",
-  "description": "Farmfleet API - Matching & booking logic",
+  "description": "Digilync API - Matching & booking logic",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",

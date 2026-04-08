@@ -33,7 +33,7 @@ async function sendUpcomingReminders() {
 
   for (const b of r.rows) {
     const timeStr = b.scheduled_time ? ` at ${String(b.scheduled_time).slice(0, 5)}` : '';
-    const base = `🔔 *Reminder:* Your Farmfleet booking is tomorrow${timeStr}.\n\n` +
+    const base = `🔔 *Reminder:* Your Digilync booking is tomorrow${timeStr}.\n\n` +
       `Service: ${b.service_type || 'Service'}\n` +
       `Size: ${b.farm_size_ha || '—'} ha\n`;
 

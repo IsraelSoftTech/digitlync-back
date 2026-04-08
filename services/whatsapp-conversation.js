@@ -1,5 +1,5 @@
 /**
- * Farmfleet WhatsApp Bot – Structured Flow
+ * Digilync WhatsApp Bot – Structured Flow
  * Batched messaging, low cost, fast onboarding, structured data.
  */
 const { pool } = require('../config/db');
@@ -137,7 +137,7 @@ async function createBookingAndNotify(waFrom, existing, provider, data) {
 
 function getMainMenu(existing = null) {
   return (
-    'Welcome to Farmfleet 🌱\n\n' +
+    'Welcome to Digilync 🌱\n\n' +
     'What would you like to do?\n\n' +
     '1. Register as Farmer\n' +
     '2. Register as Service Provider\n' +
@@ -151,7 +151,7 @@ function getMainMenu(existing = null) {
 
 function getHelpMessage() {
   return (
-    '📘 *Farmfleet Help*\n\n' +
+    '📘 *Digilync Help*\n\n' +
     '• *Register* – Sign up as farmer or service provider\n' +
     '• *Request* – Order farm services (ploughing, spraying, etc.)\n' +
     '• *My Requests* – View your bookings\n' +
@@ -165,7 +165,7 @@ function getHelpMessage() {
 function getPrivacyConsentPostRegisterMessage() {
   return (
     '🔒 *Your privacy matters*\n\n' +
-    'Farmfleet takes your personal information seriously. We use it only to deliver and improve our services: coordinating agricultural services, enabling access to service-based credit where applicable, and supporting secure transactions.\n\n' +
+    'Digilync takes your personal information seriously. We use it only to deliver and improve our services: coordinating agricultural services, enabling access to service-based credit where applicable, and supporting secure transactions.\n\n' +
     'We do not sell your data. We do not share it with third parties without your permission, except where necessary to provide the service or to meet legal obligations.\n\n' +
     'By continuing, you agree to the collection and use of your data as described above and in our Privacy Policy (digilync.com/privacy).\n\n' +
     '*Do you consent?*\n\n' +
@@ -210,9 +210,9 @@ async function handlePrivacyConsentPostRegister(waFrom, text, data) {
   if (agreed) {
     await updateSession(waFrom, { step: 'main_menu', data: {} });
     if (pending.role === 'farmer') {
-      return '✅ *Registration complete!* You are now a Farmfleet farmer.\n\nReply *MENU* for options.';
+      return '✅ *Registration complete!* You are now a Digilync farmer.\n\nReply *MENU* for options.';
     }
-    return '✅ *Registration complete!* You are now a Farmfleet service provider.\n\nReply *MENU* for options.';
+    return '✅ *Registration complete!* You are now a Digilync service provider.\n\nReply *MENU* for options.';
   }
 
   return 'Please reply *1* to Agree or *2* to Disagree.';
@@ -304,7 +304,7 @@ async function handleIncoming(waFrom, body, latitude, longitude, profileName) {
     }
     if (text === '2') {
       await updateSession(waFrom, { step: 'main_menu', data: {} });
-      return 'To edit farm details, please contact the admin team or use the Farmfleet web portal.\n\nReply *MENU* for options.';
+      return 'To edit farm details, please contact the admin team or use the Digilync web portal.\n\nReply *MENU* for options.';
     }
     if (text === '3') {
       return handleAddAnotherFarm(waFrom, existing);
@@ -416,7 +416,7 @@ async function handleIncoming(waFrom, body, latitude, longitude, profileName) {
 
 function getFarmerBasicMessage() {
   return (
-    'Welcome to Farmfleet 🌱\n' +
+    'Welcome to Digilync 🌱\n' +
     "Let's register your farm.\n\n" +
     'Please reply in this format:\n\n' +
     'Name:\n' +
@@ -1148,7 +1148,7 @@ async function handleUnsubscribeConfirm(waFrom, existing, text) {
         await pool.query('DELETE FROM providers WHERE id = $1', [existing.id]);
       }
       await pool.query('DELETE FROM whatsapp_sessions WHERE wa_phone = $1', [normalizePhone(waFrom)]);
-      return 'Your account has been successfully removed from Farmfleet.\n\nThank you for using our service.';
+      return 'Your account has been successfully removed from Digilync.\n\nThank you for using our service.';
     } catch (err) {
       console.error('Unsubscribe error:', err);
       return 'Sorry, we could not complete your request. Please try again later.';
