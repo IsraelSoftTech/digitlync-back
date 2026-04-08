@@ -8,7 +8,7 @@
 const express = require('express');
 const router = express.Router();
 const { handleIncoming } = require('../services/whatsapp-conversation');
-const { sendText, isEnabled } = require('../services/whatsapp-sender');
+const { sendBrandedText, buildBrandedBody, isEnabled } = require('../services/whatsapp-sender');
 const config = require('../config/whatsapp');
 
 /** GET - Meta webhook verification (hub.mode, hub.verify_token, hub.challenge) */
@@ -113,7 +113,7 @@ router.post('/webhook', async (req, res) => {
           const reply = await handleIncoming(waFrom, text, latitude, longitude, profileName);
           if (reply) {
             console.log('[WhatsApp] Sending reply to', '***' + String(from).slice(-4), 'len:', reply.length);
-            await sendText(waFrom, reply);
+            await sendBrandedText(waFrom, reply);
             console.log('[WhatsApp] Reply sent to', '***' + String(from).slice(-4));
           } else {
             console.log('[WhatsApp] No reply to send (handleIncoming returned null)');
@@ -122,7 +122,7 @@ router.post('/webhook', async (req, res) => {
           console.error('[WhatsApp] Webhook error:', err.message);
           console.error('[WhatsApp] Full error:', err);
           try {
-            await sendText(waFrom, 'Sorry, something went wrong. Please try again later.');
+            await sendBrandedText(waFrom, 'Sorry, something went wrong. Please try again later.');
           } catch (e) {
             console.error('[WhatsApp] Failed to send error reply:', e.message);
           }
@@ -170,8 +170,9 @@ router.post('/simulate', async (req, res) => {
 
   try {
     const reply = await handleIncoming(from, body, latitude, longitude, profileName);
+    const replyAsSent = reply ? buildBrandedBody(reply) : null;
     console.log('[WhatsApp Simulator]', { from: from.slice(-8), body: body.slice(0, 30), reply: reply ? reply.slice(0, 50) + '...' : null });
-    res.json({ reply: reply || null, from });
+    res.json({ reply: replyAsSent, replyBody: reply || null, from });
   } catch (err) {
     console.error('[WhatsApp Simulator] Error:', err);
     res.status(500).json({ error: err.message, stack: process.env.NODE_ENV === 'development' ? err.stack : undefined });

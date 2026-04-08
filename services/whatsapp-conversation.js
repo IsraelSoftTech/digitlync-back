@@ -3,7 +3,7 @@
  * Batched messaging, low cost, fast onboarding, structured data.
  */
 const { pool } = require('../config/db');
-const { sendText } = require('./whatsapp-sender');
+const { sendBrandedText } = require('./whatsapp-sender');
 const { haversineDistanceKm } = require('../utils/geo');
 
 const SERVICE_LIST = [
@@ -112,7 +112,7 @@ async function createBookingAndNotify(waFrom, existing, provider, data) {
     const estTotal = Math.round(priceHa * farmSize);
 
     try {
-      await sendText(provider.phone,
+      await sendBrandedText(provider.phone,
         `🔔 *New Request*\n\n` +
         `Service: ${data.service_type}\n` +
         `Farm size: ${farmSize} ha\n` +
@@ -137,7 +137,7 @@ async function createBookingAndNotify(waFrom, existing, provider, data) {
 
 function getMainMenu(existing = null) {
   return (
-    'Welcome to Digilync 🌱\n\n' +
+    'Welcome 🌱\n\n' +
     'What would you like to do?\n\n' +
     '1. Register as Farmer\n' +
     '2. Register as Service Provider\n' +
@@ -151,7 +151,7 @@ function getMainMenu(existing = null) {
 
 function getHelpMessage() {
   return (
-    '📘 *Digilync Help*\n\n' +
+    '📘 *Help*\n\n' +
     '• *Register* – Sign up as farmer or service provider\n' +
     '• *Request* – Order farm services (ploughing, spraying, etc.)\n' +
     '• *My Requests* – View your bookings\n' +
@@ -416,9 +416,8 @@ async function handleIncoming(waFrom, body, latitude, longitude, profileName) {
 
 function getFarmerBasicMessage() {
   return (
-    'Welcome to Digilync 🌱\n' +
     "Let's register your farm.\n\n" +
-    'Please reply in this format:\n\n' +
+    'Send each field using the label *Name:* on its own line, then your answer on the same line or the next line:\n\n' +
     'Name:\n' +
     'Region:\n' +
     'Division:\n' +
@@ -433,31 +432,14 @@ function getFarmerBasicMessage() {
   );
 }
 
-function getFarmerLocationChoiceMessage() {
+function getFarmerShareLocationMessage() {
   return (
-    'How would you like to provide your location?\n\n' +
-    '1. Latitude & Longitude (Decimal)\n' +
-    '2. Degrees & Minutes\n' +
-    '3. Share location from your device (Pin)\n\n' +
-    'Reply with 1, 2, or 3.'
-  );
-}
-
-function getFarmerGpsDecimalPrompt() {
-  return (
-    'Enter your location in this format:\n\n' +
-    'Latitude, Longitude\n\n' +
-    '*Example:*\n' +
-    '4.6382, 9.4469'
-  );
-}
-
-function getFarmerGpsDmsPrompt() {
-  return (
-    'Enter your location in this format:\n\n' +
-    'Latitude (Degrees, Minutes), Longitude (Degrees, Minutes)\n\n' +
-    '*Example:*\n' +
-    '4°38\'N, 9°26\'E'
+    '📍 *Farm location*\n\n' +
+    'Turn on *Location* (GPS) on your phone, then:\n' +
+    '• Tap *📎* → *Location* → *Send your current location*\n\n' +
+    'Or type coordinates on one line:\n' +
+    '*Example:* 4.6382, 9.4469\n\n' +
+    'Or reply *SKIP* to continue without GPS.'
   );
 }
 
@@ -494,13 +476,26 @@ function parseDmsToDecimal(text) {
 
 function parseKeyValueBlock(text) {
   const result = {};
-  const lines = text.split(/\n/).map((l) => l.trim());
-  for (const line of lines) {
+  if (!text || typeof text !== 'string') return result;
+  const lines = text.split(/\r?\n/).map((l) => l.trim());
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
     const match = line.match(/^([^:]+):\s*(.*)$/);
-    if (match) {
-      const key = match[1].trim().toLowerCase().replace(/\s+/g, '_');
-      result[key] = match[2].trim();
+    if (!match) continue;
+    const key = match[1].trim().toLowerCase().replace(/\s+/g, '_');
+    let value = match[2].trim();
+    if (value === '' && i + 1 < lines.length) {
+      let j = i + 1;
+      while (j < lines.length && lines[j] === '') j += 1;
+      if (j < lines.length) {
+        const next = lines[j];
+        if (next && !/^\s*[^:]+:\s*.+$/.test(next)) {
+          value = next.trim();
+          i = j;
+        }
+      }
     }
+    result[key] = value;
   }
   return result;
 }
@@ -530,9 +525,11 @@ async function handleFarmerFlow(waFrom, session, data, text, latitude, longitude
     case 'farmer_basic': {
       const kv = parseKeyValueBlock(text);
       const name = kv.name || kv.full_name;
-      if (!name) return 'Please include *Name:* in your reply. Example:\nName: John\nRegion: South West\n...';
+      if (!name) {
+        return 'Please include *Name:* and your area details.\n\n' + getFarmerBasicMessage();
+      }
       await updateSession(waFrom, {
-        step: 'farmer_location_choice',
+        step: 'farmer_gps_share',
         data: {
           full_name: name,
           region: kv.region || '',
@@ -541,28 +538,10 @@ async function handleFarmerFlow(waFrom, session, data, text, latitude, longitude
           district: kv.district || '',
         },
       });
-      return getFarmerLocationChoiceMessage();
+      return getFarmerShareLocationMessage();
     }
 
-    case 'farmer_location_choice': {
-      const locNum = parseInt(text.trim(), 10);
-      if (![1, 2, 3].includes(locNum)) {
-        return 'Please reply with *1*, *2*, or *3*.\n\n' + getFarmerLocationChoiceMessage();
-      }
-      if (locNum === 1) {
-        await updateSession(waFrom, { step: 'farmer_gps_coords', data: { ...data, location_opt: 1 } });
-        return getFarmerGpsDecimalPrompt();
-      }
-      if (locNum === 2) {
-        await updateSession(waFrom, { step: 'farmer_gps_dms', data: { ...data, location_opt: 2 } });
-        return getFarmerGpsDmsPrompt();
-      }
-      // locNum === 3: Share location (pin)
-      await updateSession(waFrom, { step: 'farmer_gps_share', data: { ...data, location_opt: 3 } });
-      return 'Please *share your location* (tap 📍) to set your farm location.';
-    }
-
-    case 'farmer_gps_share':
+    case 'farmer_gps_share': {
       if (text.toLowerCase() === 'skip') {
         await updateSession(waFrom, {
           step: 'farmer_farm_details',
@@ -583,35 +562,32 @@ async function handleFarmerFlow(waFrom, session, data, text, latitude, longitude
         });
         return getFarmerGpsConfirmMessage(data.district || data.region || 'Your location', lat, lng);
       }
-      return 'Please share your location (tap 📍) or reply *SKIP* to continue without GPS.';
-
-    case 'farmer_gps_coords': {
-      const match = text.match(/^(-?\d+\.?\d*)\s*[,]\s*(-?\d+\.?\d*)$/);
-      if (!match) return 'Invalid format. Use: Latitude, Longitude\n*Example:* 4.6382, 9.4469';
-      const lat = parseFloat(match[1]);
-      const lng = parseFloat(match[2]);
-      if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return 'Invalid coordinates. Latitude -90 to 90, Longitude -180 to 180.';
-      await updateSession(waFrom, {
-        step: 'farmer_gps_confirm',
-        data: { ...data, gps_lat: lat, gps_lng: lng },
-      });
-      return getFarmerGpsConfirmMessage(data.district || data.region || 'Your location', lat, lng);
-    }
-
-    case 'farmer_gps_dms': {
-      const parsed = parseDmsToDecimal(text);
-      if (!parsed) {
-        return 'Invalid format. Use: Latitude (Degrees, Minutes), Longitude (Degrees, Minutes)\n*Example:* 4°38\'N, 9°26\'E';
+      const decMatch = text.trim().match(/^(-?\d+\.?\d*)\s*[,]\s*(-?\d+\.?\d*)$/);
+      if (decMatch) {
+        const lat = parseFloat(decMatch[1]);
+        const lng = parseFloat(decMatch[2]);
+        if (lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180) {
+          await updateSession(waFrom, {
+            step: 'farmer_gps_confirm',
+            data: { ...data, gps_lat: lat, gps_lng: lng },
+          });
+          return getFarmerGpsConfirmMessage(data.district || data.region || 'Your location', lat, lng);
+        }
+        return 'Invalid coordinates. Latitude −90 to 90, Longitude −180 to 180.\n\n' + getFarmerShareLocationMessage();
       }
-      await updateSession(waFrom, {
-        step: 'farmer_gps_confirm',
-        data: {
-          ...data,
-          gps_lat: parsed.latitude,
-          gps_lng: parsed.longitude,
-        },
-      });
-      return getFarmerGpsConfirmMessage(data.district || data.region || 'Your location', parsed.latitude, parsed.longitude);
+      const parsedDms = parseDmsToDecimal(text);
+      if (parsedDms) {
+        await updateSession(waFrom, {
+          step: 'farmer_gps_confirm',
+          data: {
+            ...data,
+            gps_lat: parsedDms.latitude,
+            gps_lng: parsedDms.longitude,
+          },
+        });
+        return getFarmerGpsConfirmMessage(data.district || data.region || 'Your location', parsedDms.latitude, parsedDms.longitude);
+      }
+      return 'We could not read your location. Turn on GPS and send your *pin* (📎 → Location), or type *lat, lng* (e.g. 4.6382, 9.4469), or *SKIP*.\n\n' + getFarmerShareLocationMessage();
     }
 
     case 'farmer_gps_confirm':
@@ -620,8 +596,8 @@ async function handleFarmerFlow(waFrom, session, data, text, latitude, longitude
         return getFarmerFarmDetailsMessage();
       }
       if (text === '2' || text.toLowerCase() === 're-enter' || text.toLowerCase() === 'reenter') {
-        await updateSession(waFrom, { step: 'farmer_location_choice', data: { ...data, gps_lat: null, gps_lng: null } });
-        return getFarmerLocationChoiceMessage();
+        await updateSession(waFrom, { step: 'farmer_gps_share', data: { ...data, gps_lat: null, gps_lng: null } });
+        return getFarmerShareLocationMessage();
       }
       return 'Reply *1* to Confirm or *2* to Re-enter location.';
 
@@ -629,7 +605,7 @@ async function handleFarmerFlow(waFrom, session, data, text, latitude, longitude
       const kv = parseKeyValueBlock(text);
       const { farmSizeRaw, crop, servicesRaw } = getFarmDetailsFields(kv);
       const farmSize = parseFloat(farmSizeRaw);
-      if (isNaN(farmSize) || farmSize < 0) return 'Please include *Farm size:* (number). Example: Farm size: 2.5';
+      if (isNaN(farmSize) || farmSize < 0) return 'Please include *Farm size:* with a number.\n\n' + getFarmerFarmDetailsMessage();
       const serviceNums = servicesRaw.replace(/[^\d,]/g, '').split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => !isNaN(n) && n >= 1 && n <= 9);
       const services = serviceNums.map((n) => SERVICE_LIST[n - 1]).filter(Boolean);
       const hasOther = serviceNums.includes(9);
@@ -740,11 +716,11 @@ async function handleFarmerFlow(waFrom, session, data, text, latitude, longitude
 
 function getFarmerFarmDetailsMessage() {
   return (
-    'Now enter your farm details (use the labels below):\n\n' +
+    'Farm details — use the labels (answer on the same line or the next line):\n\n' +
     'Farm size:\n' +
     'Crop:\n' +
     'Services:\n\n' +
-    'Select services needed (reply with numbers separated by comma):\n\n' +
+    'Services: pick numbers separated by commas:\n\n' +
     '1. Ploughing\n2. Planting\n3. Spraying\n4. Irrigation\n5. Harvesting\n' +
     '6. Processing\n7. Storage\n8. Transport\n9. Other\n\n' +
     '*Example:*\n' +
@@ -774,13 +750,14 @@ function getFarmerConfirmMessage(data) {
 
 function getProviderBatchedMessage() {
   return (
-    'Register as a Service Provider:\n\n' +
+    'Service provider — reply using these labels (same line or next line after each label):\n\n' +
     'Name:\n' +
-    'Base Location (GPS or share pin):\n' +
-    'Service Radius (km):\n' +
-    'Price per hectare (FCFA):\n' +
-    'Work capacity (ha/day):\n\n' +
-    'Select services offered (comma separated):\n\n' +
+    'Radius:\n' +
+    'Price:\n' +
+    'Capacity:\n' +
+    'Services:\n\n' +
+    '*Radius* = service radius in km · *Price* = FCFA per hectare · *Capacity* = hectares you can cover per day\n\n' +
+    'Service numbers (comma-separated):\n' +
     '1. Ploughing 2. Planting 3. Spraying 4. Irrigation 5. Harvesting\n' +
     '6. Processing 7. Storage 8. Transport 9. Other\n\n' +
     '*Example:*\n' +
@@ -792,39 +769,80 @@ function getProviderBatchedMessage() {
   );
 }
 
+function getProviderLocationMessage() {
+  return (
+    '📍 *Base location*\n\n' +
+    'Turn on *Location* (GPS), then tap *📎* → *Location* → *Send your current location*.\n\n' +
+    'Or type coordinates: *4.6382, 9.4469*\n' +
+    'Or reply *SKIP* to register without GPS.'
+  );
+}
+
 async function handleProviderFlow(waFrom, session, data, text, latitude, longitude) {
   const phone = normalizePhone(waFrom);
 
   if (session.step === 'provider_batched') {
     const kv = parseKeyValueBlock(text);
     const name = kv.name || kv.full_name;
-    if (!name) return 'Please include *Name:* in your reply.';
+    if (!name) return 'Please include *Name:* and the other fields.\n\n' + getProviderBatchedMessage();
     const radius = parseFloat(kv.radius || kv.service_radius || '');
     const price = parseFloat(kv.price || kv.price_per_hectare || '');
     const capacity = parseFloat(kv.capacity || kv.work_capacity || '');
-    if (isNaN(radius) || radius < 0) return 'Please include *Radius:* (km). Example: Radius: 10';
-    if (isNaN(price) || price < 0) return 'Please include *Price:* (FCFA/ha). Example: Price: 12000';
-    if (isNaN(capacity) || capacity < 0) return 'Please include *Capacity:* (hectares per day). Example: Capacity: 3';
+    if (isNaN(radius) || radius < 0) return 'Please include *Radius:* (km). Example: Radius: 10\n\n' + getProviderBatchedMessage();
+    if (isNaN(price) || price < 0) return 'Please include *Price:* (FCFA/ha). Example: Price: 12000\n\n' + getProviderBatchedMessage();
+    if (isNaN(capacity) || capacity < 0) return 'Please include *Capacity:* (ha/day). Example: Capacity: 3\n\n' + getProviderBatchedMessage();
     const serviceNums = (kv.services || '').replace(/[^\d,]/g, '').split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => !isNaN(n) && n >= 1 && n <= 9);
     const services = serviceNums.map((n) => SERVICE_LIST[n - 1]).filter(Boolean);
-    let gpsLat = data.gps_lat;
-    let gpsLng = data.gps_lng;
+    await updateSession(waFrom, {
+      step: 'provider_location',
+      data: {
+        pending_provider: {
+          name,
+          radius,
+          price,
+          capacity,
+          services: services.length ? services : ['General'],
+          serviceNums,
+        },
+      },
+    });
+    return getProviderLocationMessage();
+  }
+
+  if (session.step === 'provider_location') {
+    const pending = data.pending_provider;
+    if (!pending || !pending.name) {
+      await updateSession(waFrom, { step: 'main_menu', data: {} });
+      return getMainMenu();
+    }
+    let gpsLat = null;
+    let gpsLng = null;
     if (latitude != null && longitude != null) {
       gpsLat = parseFloat(latitude);
       gpsLng = parseFloat(longitude);
     } else {
-      const coordMatch = (kv.base_location || kv.location || text).match(/(-?\d+\.?\d*)\s*[,]\s*(-?\d+\.?\d*)/);
+      const coordMatch = String(text || '').trim().match(/(-?\d+\.?\d*)\s*[,]\s*(-?\d+\.?\d*)/);
       if (coordMatch) {
         gpsLat = parseFloat(coordMatch[1]);
         gpsLng = parseFloat(coordMatch[2]);
       }
     }
-    const haPerHour = capacity / 8;
+    if (gpsLat != null && gpsLng != null) {
+      if (gpsLat < -90 || gpsLat > 90 || gpsLng < -180 || gpsLng > 180) {
+        return 'Invalid coordinates. Try again or send your *location pin*.\n\n' + getProviderLocationMessage();
+      }
+    } else if (String(text || '').trim().toLowerCase() === 'skip') {
+      gpsLat = null;
+      gpsLng = null;
+    } else {
+      return 'Send your *location pin* (📎 → Location), type *lat, lng*, or *SKIP*.\n\n' + getProviderLocationMessage();
+    }
+    const haPerHour = pending.capacity / 8;
     try {
       const ins = await pool.query(
         `INSERT INTO providers (full_name, phone, services_offered, work_capacity_ha_per_hour, base_price_per_ha, service_radius_km, gps_lat, gps_lng)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
-        [name, phone, (services.length ? services : ['General']).join(', '), haPerHour, price, radius, gpsLat || null, gpsLng || null]
+        [pending.name, phone, pending.services.join(', '), haPerHour, pending.price, pending.radius, gpsLat, gpsLng]
       );
       const providerId = ins.rows[0].id;
       await updateSession(waFrom, {
@@ -1212,7 +1230,7 @@ async function handleProviderAcceptJob(waFrom, existing, bookingId) {
     if (r.rows.length === 0) return 'Job not found. Reply *4* for your jobs.';
     const b = r.rows[0];
     try {
-      await sendText(b.farmer_phone, `✅ *Booking confirmed!*\n\nProvider *${existing.name}* has accepted your request.\nService: ${b.service_type}\n\nReply *MENU* for options.`);
+      await sendBrandedText(b.farmer_phone, `✅ *Booking confirmed!*\n\nProvider *${existing.name}* has accepted your request.\nService: ${b.service_type}\n\nReply *MENU* for options.`);
     } catch (e) {
       console.error('WhatsApp notify farmer failed:', e);
     }

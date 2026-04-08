@@ -57,8 +57,7 @@ async function run() {
         'District: Kumba 1',
       desc: 'Structured location (farmer_basic)',
     },
-    { body: '1', desc: 'Choose decimal lat/lng' },
-    { body: '4.6382, 9.4469', desc: 'GPS coordinates' },
+    { body: '4.6382, 9.4469', desc: 'GPS coordinates (decimal, after location prompt)' },
     { body: '1', desc: 'Confirm GPS' },
     {
       body: 'Farm size: 2.5\nCrop: Maize\nServices: 1,3',

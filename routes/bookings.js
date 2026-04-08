@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { pool } = require('../config/db');
 const { logAudit, getAdminFromRequest } = require('../services/audit-log');
-const { sendText, isEnabled } = require('../services/whatsapp-sender');
+const { sendBrandedText, isEnabled } = require('../services/whatsapp-sender');
 
 router.get('/', async (req, res) => {
   const { status, unassigned } = req.query;
@@ -106,7 +106,7 @@ router.put('/:id', async (req, res) => {
         const providerName = p.rows[0]?.full_name || 'Provider';
         if (p.rows.length > 0 && p.rows[0].phone) {
           try {
-            await sendText(p.rows[0].phone,
+            await sendBrandedText(p.rows[0].phone,
               `🔔 *New job request*\n\n` +
               `Farmer: ${f.rows[0]?.full_name || prev.farmer_name}\n` +
               `Service: ${booking.service_type}\n` +
@@ -120,7 +120,7 @@ router.put('/:id', async (req, res) => {
         }
         if (f.rows.length > 0 && f.rows[0].phone) {
           try {
-            await sendText(f.rows[0].phone,
+            await sendBrandedText(f.rows[0].phone,
               `✅ *Provider assigned!*\n\n` +
               `*${providerName}* has been assigned to your *${booking.service_type}* request.\n\n` +
               `They will confirm shortly. Reply *MENU* for options.`

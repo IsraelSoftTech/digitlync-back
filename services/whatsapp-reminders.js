@@ -4,7 +4,7 @@
  * Call from cron: node scripts/run-reminders.js (or similar)
  */
 const { pool } = require('../config/db');
-const { sendText, isEnabled } = require('./whatsapp-sender');
+const { sendBrandedText, isEnabled } = require('./whatsapp-sender');
 
 /** Send reminders for bookings in the next 24 hours */
 async function sendUpcomingReminders() {
@@ -33,12 +33,12 @@ async function sendUpcomingReminders() {
 
   for (const b of r.rows) {
     const timeStr = b.scheduled_time ? ` at ${String(b.scheduled_time).slice(0, 5)}` : '';
-    const base = `🔔 *Reminder:* Your Digilync booking is tomorrow${timeStr}.\n\n` +
+    const base = `🔔 *Reminder:* Your booking is tomorrow${timeStr}.\n\n` +
       `Service: ${b.service_type || 'Service'}\n` +
       `Size: ${b.farm_size_ha || '—'} ha\n`;
 
     try {
-      await sendText(b.farmer_phone, base + `Provider: ${b.provider_name || '—'}\n\nPlease be on time. Reply *MENU* for options.`);
+      await sendBrandedText(b.farmer_phone, base + `Provider: ${b.provider_name || '—'}\n\nPlease be on time. Reply *MENU* for options.`);
       sent++;
     } catch (e) {
       console.error('[Reminders] Farmer send failed:', b.farmer_phone, e.message);
@@ -46,7 +46,7 @@ async function sendUpcomingReminders() {
     }
 
     try {
-      await sendText(b.provider_phone, base + `Farmer: ${b.farmer_name || '—'}\n\nPlease be on time. Reply *MENU* for options.`);
+      await sendBrandedText(b.provider_phone, base + `Farmer: ${b.farmer_name || '—'}\n\nPlease be on time. Reply *MENU* for options.`);
       sent++;
     } catch (e) {
       console.error('[Reminders] Provider send failed:', b.provider_phone, e.message);
@@ -76,7 +76,7 @@ async function sendRatingPrompts() {
   let sent = 0;
   for (const row of r.rows) {
     try {
-      await sendText(row.farmer_phone,
+      await sendBrandedText(row.farmer_phone,
         `✅ *Service completed!*\n\n` +
         `How was your experience with *${row.provider_name}* (${row.service_type})?\n\n` +
         'Reply *RATE* to rate this service (1-5 stars).'
