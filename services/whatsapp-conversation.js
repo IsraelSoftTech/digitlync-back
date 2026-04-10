@@ -128,6 +128,52 @@ async function finalizeFarmerRegistrationFromPendingGps(waPhone, pending, lat, l
   }
 }
 
+/**
+ * Insert provider after GPS (web or WhatsApp) or SKIP. Sends privacy consent on WhatsApp.
+ */
+async function finalizeProviderRegistrationFromPendingGps(waPhone, pending, lat, lng, { source = 'web', skipGps = false } = {}) {
+  const phoneCanonical = normalizePhone(waPhone);
+  const digits = phoneDigits(phoneCanonical);
+  const dup = await pool.query(
+    "SELECT id FROM providers WHERE REGEXP_REPLACE(phone, '[^0-9]', '', 'g') = $1",
+    [digits]
+  );
+  if (dup.rows.length > 0) {
+    return { ok: false, error: 'duplicate' };
+  }
+  let gpsLat = null;
+  let gpsLng = null;
+  if (!skipGps) {
+    const latN = parseFloat(lat);
+    const lngN = parseFloat(lng);
+    if (Number.isNaN(latN) || Number.isNaN(lngN) || latN < -90 || latN > 90 || lngN < -180 || lngN > 180) {
+      return { ok: false, error: 'invalid_coords' };
+    }
+    gpsLat = latN;
+    gpsLng = lngN;
+  }
+  const haPerHour = pending.capacity / 8;
+  try {
+    const ins = await pool.query(
+      `INSERT INTO providers (full_name, phone, services_offered, work_capacity_ha_per_hour, base_price_per_ha, service_radius_km, gps_lat, gps_lng)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+      [pending.name, phoneCanonical, pending.services.join(', '), haPerHour, pending.price, pending.radius, gpsLat, gpsLng]
+    );
+    const providerId = ins.rows[0].id;
+    await updateSession(waPhone, {
+      step: 'privacy_consent_new',
+      user_type: 'unknown',
+      data: { privacy_pending: { role: 'provider', id: providerId } },
+    });
+    const to = `whatsapp:${digits}`;
+    await sendBrandedText(to, getPrivacyConsentPostRegisterMessage());
+    return { ok: true, provider_id: providerId };
+  } catch (err) {
+    console.error('finalizeProviderRegistrationFromPendingGps:', err);
+    return { ok: false, error: 'db' };
+  }
+}
+
 async function findMatchingProviders(serviceType, farmerLat, farmerLng) {
   const r = await pool.query(
     `SELECT p.id, p.full_name, p.phone, p.services_offered, p.base_price_per_ha, p.service_radius_km,
@@ -253,6 +299,7 @@ function parseFarmerWaRegistrationForm(text) {
     kv.village_location ||
     kv.village ||
     kv.location ||
+    kv['village/location'] ||
     kv['enter_your_village/location'] ||
     kv.enter_your_village_location ||
     ''
@@ -271,7 +318,7 @@ function getHelpMessage() {
   return (
     '📘 *Help*\n\n' +
     '• *1 Farmer* – Send your details, then open the *GPS link* to drop your farm pin\n' +
-    '• *2 Provider* – Reply with your service profile, then share your base location\n' +
+    '• *2 Provider* – Reply with your service profile, then open the *GPS link* for your base location\n' +
     '• *3 Request* – Book a service (farmers only)\n' +
     '• *4 My Requests* – Your bookings / jobs\n' +
     '• *7 Recap* – See your saved farms or profile\n' +
@@ -446,6 +493,14 @@ async function handleIncoming(waFrom, body, latitude, longitude, profileName) {
         'Reply *MENU* to cancel.'
       );
     }
+    if (session.step === 'provider_await_gps_web' && t === '1' && data.gps_token && data.pending_provider) {
+      const gpsUrl = `${getFrontendBaseUrl()}/gps?t=${encodeURIComponent(data.gps_token)}&role=provider`;
+      return (
+        `🔗 *Click to set your base location:*\n${gpsUrl}\n\n` +
+        'Or send your *location pin* in WhatsApp (📎 → Location).\n\n' +
+        'Reply *MENU* to cancel.'
+      );
+    }
     if (t === '2' && session.step === 'farmer_wa_form') {
       await updateSession(waFrom, { user_type: 'provider', step: 'provider_batched', data: {} });
       return 'Switched to *Service Provider* registration.\n\n' + getProviderBatchedMessage();
@@ -457,6 +512,10 @@ async function handleIncoming(waFrom, body, latitude, longitude, profileName) {
     if (t === '2' && session.step === 'farmer_await_gps_web') {
       await updateSession(waFrom, { user_type: 'provider', step: 'provider_batched', data: {} });
       return 'Cancelled the farmer GPS step. Starting *Service Provider* registration.\n\n' + getProviderBatchedMessage();
+    }
+    if (t === '2' && session.step === 'provider_await_gps_web') {
+      await updateSession(waFrom, { user_type: 'farmer', step: 'farmer_wa_form', data: {} });
+      return 'Cancelled the provider GPS step. Starting *Farmer* registration.\n\n' + getFarmerWaRegistrationPrompt();
     }
   }
 
@@ -616,7 +675,8 @@ function parseKeyValueBlock(text) {
     const line = lines[i];
     const match = line.match(/^([^:]+):\s*(.*)$/);
     if (!match) continue;
-    const key = match[1].trim().toLowerCase().replace(/\s+/g, '_');
+    // Slashes (e.g. Village/Location) must become underscores or lookups like kv.village_location miss.
+    const key = match[1].trim().toLowerCase().replace(/[\s/]+/g, '_');
     let value = match[2].trim();
     if (value === '' && i + 1 < lines.length) {
       let j = i + 1;
@@ -724,12 +784,12 @@ function getProviderBatchedMessage() {
   );
 }
 
-function getProviderLocationMessage() {
+function getProviderAwaitGpsWebMessage() {
   return (
-    '📍 *Base location*\n\n' +
-    'Turn on *Location* (GPS), then tap *📎* → *Location* → *Send your current location*.\n\n' +
-    'Or type coordinates: *4.6382, 9.4469*\n' +
-    'Or reply *SKIP* to register without GPS.'
+    '📍 *Waiting for your base location*\n\n' +
+    'Use the *Click to set your base location* link we sent, or send your *location pin* here (📎 → Location).\n\n' +
+    'You can also type coordinates: *4.6382, 9.4469* or reply *SKIP* to register without GPS.\n\n' +
+    'Reply *1* to resend the link. Reply *MENU* to cancel.'
   );
 }
 
@@ -748,9 +808,13 @@ async function handleProviderFlow(waFrom, session, data, text, latitude, longitu
     if (isNaN(capacity) || capacity < 0) return 'Please include *Capacity:* (ha/day). Example: Capacity: 3\n\n' + getProviderBatchedMessage();
     const serviceNums = (kv.services || '').replace(/[^\d,]/g, '').split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => !isNaN(n) && n >= 1 && n <= 9);
     const services = serviceNums.map((n) => SERVICE_LIST[n - 1]).filter(Boolean);
+    const token = crypto.randomUUID();
+    const gpsUrl = `${getFrontendBaseUrl()}/gps?t=${encodeURIComponent(token)}&role=provider`;
     await updateSession(waFrom, {
-      step: 'provider_location',
+      step: 'provider_await_gps_web',
+      user_type: 'provider',
       data: {
+        gps_token: token,
         pending_provider: {
           name,
           radius,
@@ -761,14 +825,20 @@ async function handleProviderFlow(waFrom, session, data, text, latitude, longitu
         },
       },
     });
-    return getProviderLocationMessage();
+    return (
+      '✅ Profile received.\n\n' +
+      `🔗 *Click to set your base location:*\n${gpsUrl}\n\n` +
+      'Open the link, allow location when your browser asks, and your base pin will be saved automatically.\n\n' +
+      'We will confirm here when GPS is saved.\n\n' +
+      'Reply *1* to resend the link. Reply *MENU* to cancel.'
+    );
   }
 
-  if (session.step === 'provider_location') {
+  if (session.step === 'provider_await_gps_web') {
     const pending = data.pending_provider;
     if (!pending || !pending.name) {
       await updateSession(waFrom, { step: 'main_menu', data: {} });
-      return getMainMenu();
+      return getMainMenu(await findExistingUser(phone));
     }
     let gpsLat = null;
     let gpsLng = null;
@@ -784,32 +854,24 @@ async function handleProviderFlow(waFrom, session, data, text, latitude, longitu
     }
     if (gpsLat != null && gpsLng != null) {
       if (gpsLat < -90 || gpsLat > 90 || gpsLng < -180 || gpsLng > 180) {
-        return 'Invalid coordinates. Try again or send your *location pin*.\n\n' + getProviderLocationMessage();
+        return 'Invalid coordinates. Try again or open the GPS link.\n\n' + getProviderAwaitGpsWebMessage();
       }
-    } else if (String(text || '').trim().toLowerCase() === 'skip') {
-      gpsLat = null;
-      gpsLng = null;
-    } else {
-      return 'Send your *location pin* (📎 → Location), type *lat, lng*, or *SKIP*.\n\n' + getProviderLocationMessage();
+      const r = await finalizeProviderRegistrationFromPendingGps(phone, pending, gpsLat, gpsLng, { source: 'whatsapp' });
+      if (r.ok) return null;
+      if (r.error === 'duplicate') {
+        return 'This WhatsApp number is already registered as a provider. Reply *MENU* for options.';
+      }
+      return 'We could not save your location. Try the web link again or send *MENU*.';
     }
-    const haPerHour = pending.capacity / 8;
-    try {
-      const ins = await pool.query(
-        `INSERT INTO providers (full_name, phone, services_offered, work_capacity_ha_per_hour, base_price_per_ha, service_radius_km, gps_lat, gps_lng)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
-        [pending.name, phone, pending.services.join(', '), haPerHour, pending.price, pending.radius, gpsLat, gpsLng]
-      );
-      const providerId = ins.rows[0].id;
-      await updateSession(waFrom, {
-        step: 'privacy_consent_new',
-        user_type: 'unknown',
-        data: { privacy_pending: { role: 'provider', id: providerId } },
-      });
-      return getPrivacyConsentPostRegisterMessage();
-    } catch (err) {
-      console.error('Provider registration error:', err);
-      return 'Sorry, registration failed. Please try again.';
+    if (String(text || '').trim().toLowerCase() === 'skip') {
+      const r = await finalizeProviderRegistrationFromPendingGps(phone, pending, null, null, { skipGps: true });
+      if (r.ok) return null;
+      if (r.error === 'duplicate') {
+        return 'This WhatsApp number is already registered as a provider. Reply *MENU* for options.';
+      }
+      return 'We could not complete registration. Please try again.';
     }
+    return getProviderAwaitGpsWebMessage();
   }
 
   await updateSession(waFrom, { step: 'main_menu', data: {} });
@@ -1217,4 +1279,5 @@ module.exports = {
   findExistingUser,
   getMainMenu,
   finalizeFarmerRegistrationFromPendingGps,
+  finalizeProviderRegistrationFromPendingGps,
 };
