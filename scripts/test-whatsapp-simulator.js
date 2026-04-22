@@ -59,8 +59,8 @@ async function run() {
     },
     { from, body: '', latitude: 4.6382, longitude: 9.4469, desc: 'GPS as WhatsApp location (simulator)' },
     {
-      body: 'Farm size: 2.5\nCrop: Maize\nServices: 1,3',
-      desc: 'Farm details (size, crop, services)',
+      body: 'Farm Size: 2.5\nCrop Type: Maize, Beans\nServices: 1,3',
+      desc: 'Farm details (labels like Crop Type / Farm Size)',
     },
     { body: '2', desc: 'No additional farm' },
     { body: '1', desc: 'Confirm registration' },

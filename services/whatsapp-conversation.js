@@ -444,7 +444,7 @@ function buildFarmerConfirmationMessage(pending) {
 function parseFarmDetailsBatch(text) {
   const kv = parseKeyValueBlock(text);
   const farmSize = parseFloat(kv.farm_size || kv['farm_size_(hectares)'] || '');
-  const crop = (kv.crop || kv.crops || kv['crop(s)'] || '').trim();
+  const crop = (kv.crop || kv.crops || kv.crop_type || kv['crop(s)'] || '').trim();
   const serviceNums = (kv.services || '')
     .replace(/[^\d,]/g, '')
     .split(',')
@@ -1446,7 +1446,7 @@ async function handleAddAnotherFarm(waFrom, existing) {
 async function handleAddFarmDetails(waFrom, existing, text, data) {
   const kv = parseKeyValueBlock(text);
   const farmSize = parseFloat(kv.farm_size || kv.farm_size_hectares || '');
-  const crop = kv.crop || kv.crops || '';
+  const crop = kv.crop || kv.crops || kv.crop_type || '';
   if (isNaN(farmSize) || farmSize < 0) return 'Please include *Farm size:* (number). Example: Farm size: 2.5\n\n' + getAddFarmDetailsMessage();
   try {
     const farmerRes = await pool.query('SELECT gps_lat, gps_lng FROM farmers WHERE id = $1', [existing.id]);
@@ -1566,7 +1566,7 @@ async function handleEditFarmSelect(waFrom, existing, text, data) {
 async function handleEditFarmInput(waFrom, existing, text, data) {
   const kv = parseKeyValueBlock(text);
   const farmSize = parseFloat(kv.farm_size || kv.farm_size_hectares || '');
-  const crop = (kv.crop || kv.crops || '').trim();
+  const crop = (kv.crop || kv.crops || kv.crop_type || '').trim();
   if (isNaN(farmSize) || farmSize < 0 || !crop) {
     return (
       'Please send *Farm size:* and *Crop:* (both required).\n\n' +
