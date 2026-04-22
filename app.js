@@ -4,14 +4,16 @@ const cors = require('cors');
 const app = express();
 
 // CORS: allow frontend (localhost:3000 in dev, digilync.net in prod)
+// FRONTEND_URL is merged with defaults so a single origin in .env does not drop www / Render preview.
 const defaultOrigins =
   process.env.NODE_ENV === 'production'
     ? ['https://digilync.net', 'https://www.digilync.net', 'https://digitlync-front.onrender.com']
     : ['http://localhost:3000'];
-const allowedOrigins = (process.env.FRONTEND_URL || defaultOrigins.join(','))
+const envOrigins = (process.env.FRONTEND_URL || '')
   .split(',')
   .map((o) => o.trim())
   .filter(Boolean);
+const allowedOrigins = [...new Set([...defaultOrigins, ...envOrigins])];
 const corsOptions = {
   origin: (origin, cb) => {
     // Allow requests with no origin (e.g. curl, Postman) or matching allowed list
