@@ -3,6 +3,7 @@ const router = express.Router();
 const { pool } = require('../config/db');
 const { logAudit, getAdminFromRequest } = require('../services/audit-log');
 const { sendBrandedText, isEnabled } = require('../services/whatsapp-sender');
+const { sendBotReply, buildOptionListReply } = require('../services/whatsapp-interactive');
 
 router.get('/', async (req, res) => {
   const { status, unassigned } = req.query;
@@ -106,13 +107,19 @@ router.put('/:id', async (req, res) => {
         const providerName = p.rows[0]?.full_name || 'Provider';
         if (p.rows.length > 0 && p.rows[0].phone) {
           try {
-            await sendBrandedText(p.rows[0].phone,
-              `🔔 *New job request*\n\n` +
-              `Farmer: ${f.rows[0]?.full_name || prev.farmer_name}\n` +
-              `Service: ${booking.service_type}\n` +
-              `Size: ${booking.farm_size_ha || '—'} ha\n` +
-              `Date: ${booking.scheduled_date || 'TBD'}\n\n` +
-              `Reply *ACCEPT ${booking.id}* to accept or *REJECT ${booking.id}* to decline.`
+            await sendBotReply(
+              p.rows[0].phone,
+              buildOptionListReply(
+                `🔔 *New job request #${booking.id}*\n\n` +
+                  `Farmer: ${f.rows[0]?.full_name || prev.farmer_name}\n` +
+                  `Service: ${booking.service_type}\n` +
+                  `Size: ${booking.farm_size_ha || '—'} ha\n` +
+                  `Date: ${booking.scheduled_date || 'TBD'}`,
+                [
+                  { id: `accept_${booking.id}`, title: 'Accept', description: 'Confirm this booking' },
+                  { id: `reject_${booking.id}`, title: 'Reject', description: 'Decline this booking' },
+                ]
+              )
             );
           } catch (e) {
             console.error('[Bookings] WhatsApp notify provider failed:', e);

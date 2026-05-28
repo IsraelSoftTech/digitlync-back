@@ -113,6 +113,69 @@ async function sendBrandedText(to, body) {
 }
 
 /**
+ * Send a WhatsApp interactive list message (tap "Select an option" → radio-style rows).
+ * @param {string} to
+ * @param {{ header?: string, body: string, footer?: string, buttonText?: string, sections: Array }} payload
+ */
+async function sendInteractiveList(to, { header, body, footer, buttonText, sections }) {
+  if (!config.enabled) {
+    throw new Error('WhatsApp/Meta is not configured. Set META_WHATSAPP_ACCESS_TOKEN and META_WHATSAPP_PHONE_NUMBER_ID.');
+  }
+
+  const phone = toWhatsAppPhone(to);
+  const interactive = {
+    type: 'list',
+    body: { text: String(body).slice(0, 1024) },
+    action: {
+      button: String(buttonText || 'Select an option').slice(0, 20),
+      sections: (sections || []).map((sec) => ({
+        title: String(sec.title || 'Options').slice(0, 24),
+        rows: (sec.rows || []).slice(0, 10).map((row) => {
+          const item = {
+            id: String(row.id).slice(0, 200),
+            title: String(row.title).slice(0, 24),
+          };
+          if (row.description) item.description = String(row.description).slice(0, 72);
+          return item;
+        }),
+      })),
+    },
+  };
+
+  if (header) {
+    interactive.header = { type: 'text', text: String(header).slice(0, 60) };
+  }
+  if (footer) {
+    interactive.footer = { text: String(footer).slice(0, 60) };
+  }
+
+  const res = await fetch(`${META_GRAPH_URL}/${config.phoneNumberId}/messages`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${config.accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to: phone,
+      type: 'interactive',
+      interactive,
+    }),
+  });
+
+  if (!res.ok) {
+    const errBody = await res.text();
+    console.error('[WhatsApp] Meta API list error', res.status, errBody);
+    throw new Error(`Meta WhatsApp API error ${res.status}: ${errBody}`);
+  }
+
+  const data = await res.json();
+  console.log('[WhatsApp] Interactive list sent to', phone);
+  return data;
+}
+
+/**
  * Send a template message (for approved templates)
  * @param {string} to - Recipient phone
  * @param {string} templateName - Template name (e.g. hello_world)
@@ -156,6 +219,7 @@ module.exports = {
   sendText,
   sendBrandedText,
   sendImageWithCaption,
+  sendInteractiveList,
   buildBrandedBody,
   toWhatsAppPhone,
   isEnabled: () => config.enabled,

@@ -8,7 +8,8 @@
 const express = require('express');
 const router = express.Router();
 const { handleIncoming } = require('../services/whatsapp-conversation');
-const { sendBrandedText, buildBrandedBody, isEnabled } = require('../services/whatsapp-sender');
+const { buildBrandedBody, isEnabled } = require('../services/whatsapp-sender');
+const { sendBotReply, isListReply } = require('../services/whatsapp-interactive');
 const config = require('../config/whatsapp');
 
 /**
@@ -123,7 +124,7 @@ router.post('/webhook', async (req, res) => {
         } else if (msg.type === 'interactive') {
           const btn = msg.interactive?.button_reply;
           const list = msg.interactive?.list_reply;
-          text = (btn?.title || list?.title || list?.description || '').trim();
+          text = (btn?.id || list?.id || btn?.title || list?.title || list?.description || '').trim();
           if (!text) {
             console.log('[WhatsApp] Skipping interactive message with empty body');
             continue;
@@ -153,8 +154,9 @@ router.post('/webhook', async (req, res) => {
         try {
           const reply = await handleIncoming(waFrom, text, latitude, longitude, profileName);
           if (reply) {
-            console.log('[WhatsApp] Sending reply to', '***' + String(from).slice(-4), 'len:', reply.length);
-            await sendBrandedText(waFrom, reply);
+            const replyKind = isListReply(reply) ? 'interactive_list' : 'text';
+            console.log('[WhatsApp] Sending reply to', '***' + String(from).slice(-4), 'kind:', replyKind);
+            await sendBotReply(waFrom, reply);
             console.log('[WhatsApp] Reply sent to', '***' + String(from).slice(-4));
           } else {
             console.log('[WhatsApp] No reply to send (handleIncoming returned null)');
@@ -163,7 +165,7 @@ router.post('/webhook', async (req, res) => {
           console.error('[WhatsApp] Webhook error:', err.message);
           console.error('[WhatsApp] Full error:', err);
           try {
-            await sendBrandedText(waFrom, 'Sorry, something went wrong. Please try again later.');
+            await sendBotReply(waFrom, 'Sorry, something went wrong. Please try again later.');
           } catch (e) {
             console.error('[WhatsApp] Failed to send error reply:', e.message);
           }
@@ -211,9 +213,20 @@ router.post('/simulate', async (req, res) => {
 
   try {
     const reply = await handleIncoming(from, body, latitude, longitude, profileName);
-    const replyAsSent = reply ? buildBrandedBody(reply) : null;
-    console.log('[WhatsApp Simulator]', { from: from.slice(-8), body: body.slice(0, 30), reply: reply ? reply.slice(0, 50) + '...' : null });
-    res.json({ reply: replyAsSent, replyBody: reply || null, from });
+    const replyAsSent = reply
+      ? (isListReply(reply) ? reply : buildBrandedBody(reply))
+      : null;
+    console.log('[WhatsApp Simulator]', {
+      from: from.slice(-8),
+      body: body.slice(0, 30),
+      replyKind: reply ? (isListReply(reply) ? 'interactive_list' : 'text') : null,
+    });
+    res.json({
+      reply: replyAsSent,
+      replyBody: reply || null,
+      replyKind: reply ? (isListReply(reply) ? 'interactive_list' : 'text') : null,
+      from,
+    });
   } catch (err) {
     console.error('[WhatsApp Simulator] Error:', err);
     res.status(500).json({ error: err.message, stack: process.env.NODE_ENV === 'development' ? err.stack : undefined });

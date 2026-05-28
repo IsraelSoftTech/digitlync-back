@@ -5,6 +5,12 @@
 const crypto = require('crypto');
 const { pool } = require('../config/db');
 const { sendBrandedText } = require('./whatsapp-sender');
+const {
+  buildOptionListReply,
+  buildServiceRows,
+  normalizeUserChoice,
+  sendBotReply,
+} = require('./whatsapp-interactive');
 const { haversineDistanceKm } = require('../utils/geo');
 
 const SERVICE_LIST = [
@@ -137,9 +143,10 @@ async function insertFarmerFullFromPending(waPhone, pending) {
     }
     await updateSession(waPhone, { step: 'main_menu', user_type: 'unknown', data: {} });
     const existing = await findExistingUser(phoneCanonical);
-    const menu = getMainMenu(existing);
-    const body = `Registration Successful\n\n${menu}`;
-    await sendBrandedText(`whatsapp:${digits}`, body);
+    await sendBotReply(
+      `whatsapp:${digits}`,
+      buildOptionListReply('✅ Registration successful! Choose your next step below.', getMainMenuRows(existing))
+    );
     return { ok: true, farmer_id: farmerId };
   } catch (err) {
     console.error('insertFarmerFullFromPending:', err);
@@ -236,7 +243,7 @@ async function finalizeProviderRegistrationFromPendingGps(waPhone, pending, lat,
       data: { privacy_pending: { role: 'provider', id: providerId } },
     });
     const to = `whatsapp:${digits}`;
-    await sendBrandedText(to, getPrivacyConsentPostRegisterMessage());
+    await sendBotReply(to, getPrivacyConsentPostRegisterMessage());
     return { ok: true, provider_id: providerId };
   } catch (err) {
     console.error('finalizeProviderRegistrationFromPendingGps:', err);
@@ -302,14 +309,19 @@ async function createBookingAndNotify(waFrom, existing, provider, data) {
     const estTotal = Math.round(priceHa * farmSize);
 
     try {
-      await sendBrandedText(provider.phone,
-        `*New Request:*\n\n` +
-        `Service: ${data.service_type}\n` +
-        `Farm size: ${farmSize} ha\n` +
-        `Distance: ${provider.distance_km != null ? provider.distance_km.toFixed(1) + ' km' : '—'}\n` +
-        `Total Earnings: ${estTotal.toLocaleString()} FCFA\n\n` +
-        `1. Accept\n2. Reject\n\n` +
-        `If you have several requests, reply *ACCEPT ${bookingId}* or *REJECT ${bookingId}*.`
+      await sendBotReply(
+        provider.phone,
+        buildOptionListReply(
+          `*New request #${bookingId}*\n\n` +
+            `Service: ${data.service_type}\n` +
+            `Farm size: ${farmSize} ha\n` +
+            `Distance: ${provider.distance_km != null ? provider.distance_km.toFixed(1) + ' km' : '—'}\n` +
+            `Total earnings: ${estTotal.toLocaleString()} FCFA`,
+          [
+            { id: `accept_${bookingId}`, title: 'Accept', description: 'Confirm this booking' },
+            { id: `reject_${bookingId}`, title: 'Reject', description: 'Decline this booking' },
+          ]
+        )
       );
     } catch (e) {
       console.error('WhatsApp notify provider failed:', e);
@@ -325,19 +337,23 @@ async function createBookingAndNotify(waFrom, existing, provider, data) {
   }
 }
 
-function getMainMenu(existing = null) {
-  let msg =
-    'Welcome to DigiLync \u{1F331}\n\n' +
-    'What would you like to do?\n\n' +
-    '1. Register as Farmer\n' +
-    '2. Register as Service Provider\n' +
-    '3. Request a Service\n' +
-    '4. My Requests\n' +
-    '5. Help';
+function getMainMenuRows(existing = null) {
+  const rows = [
+    { id: 'main_1', title: 'Register Farmer', description: 'Sign up your farm' },
+    { id: 'main_2', title: 'Register Provider', description: 'Offer ag services' },
+    { id: 'main_3', title: 'Request Service', description: 'Book farm work' },
+    { id: 'main_4', title: 'My Requests', description: 'View bookings & jobs' },
+    { id: 'main_5', title: 'Help', description: 'How DigiLync works' },
+  ];
   if (existing) {
-    msg += '\n6. Unsubscribe\n7. Recap';
+    rows.push({ id: 'main_6', title: 'Unsubscribe', description: 'Remove your account' });
+    rows.push({ id: 'main_7', title: 'Recap', description: 'Profile & farm summary' });
   }
-  return msg;
+  return rows;
+}
+
+function getMainMenu(existing = null) {
+  return buildOptionListReply('What would you like to do today?', getMainMenuRows(existing));
 }
 
 /** Base URL for web app links (GPS capture page). Uses FRONTEND_URL from .env (same as CORS). */
@@ -408,11 +424,10 @@ function getFarmerOtherServicesMessage() {
 }
 
 function getFarmerMultiFarmMessage() {
-  return (
-    'Do you have another farm?\n\n' +
-    '1. Yes\n' +
-    '2. No'
-  );
+  return buildOptionListReply('Do you have another farm to register?', [
+    { id: 'opt_1', title: 'Yes', description: 'Add another farm plot' },
+    { id: 'opt_2', title: 'No', description: 'Continue to confirmation' },
+  ]);
 }
 
 function getFarmerAwaitGpsMessage(gpsUrl) {
@@ -427,7 +442,7 @@ function getFarmerAwaitGpsMessage(gpsUrl) {
 
 function buildFarmerConfirmationMessage(pending) {
   const district = (pending.district || pending.subdivision || '—').trim() || '—';
-  const lines = ['Please confirm your details:\n'];
+  const lines = ['Please confirm your registration details:'];
   lines.push(`Name: ${(pending.full_name || '').trim() || '—'}`);
   lines.push(`Location: ${district}`);
   const farms = pending.farms || [];
@@ -437,8 +452,10 @@ function buildFarmerConfirmationMessage(pending) {
       `Farm ${i + 1}: ${f.plot_size_ha} ha — ${(f.crop_type || '—').trim()} — ${svc}`
     );
   });
-  lines.push('\n1. Confirm\n2. Edit');
-  return lines.join('\n');
+  return buildOptionListReply(lines.join('\n'), [
+    { id: 'confirm_1', title: 'Confirm', description: 'Submit registration' },
+    { id: 'confirm_2', title: 'Edit', description: 'Change your details' },
+  ]);
 }
 
 function parseFarmDetailsBatch(text) {
@@ -470,14 +487,15 @@ function getHelpMessage() {
 
 /** Shown immediately after farmer/provider registration; Agree completes onboarding, Disagree removes the new record. */
 function getPrivacyConsentPostRegisterMessage() {
-  return (
+  return buildOptionListReply(
     '🔒 *Your privacy matters*\n\n' +
-    'Digilync takes your personal information seriously. We use it only to deliver and improve our services: coordinating agricultural services, enabling access to service-based credit where applicable, and supporting secure transactions.\n\n' +
-    'We do not sell your data. We do not share it with third parties without your permission, except where necessary to provide the service or to meet legal obligations.\n\n' +
-    'By continuing, you agree to the collection and use of your data as described above and in our Privacy Policy (digilync.com/privacy).\n\n' +
-    '*Do you consent?*\n\n' +
-    '1. Agree\n' +
-    '2. Disagree'
+      'Digilync uses your information only to deliver agricultural services, credit access where applicable, and secure transactions. We do not sell your data.\n\n' +
+      'By continuing, you agree to our Privacy Policy (digilync.com/privacy).\n\n' +
+      '*Do you consent?*',
+    [
+      { id: 'privacy_1', title: 'Agree', description: 'Accept and continue' },
+      { id: 'privacy_2', title: 'Disagree', description: 'Remove registration' },
+    ]
   );
 }
 
@@ -558,21 +576,40 @@ async function getFarmerFarms(farmerId) {
   }];
 }
 
+function buildProviderChoiceListReply(providers, farmSizeHa) {
+  const rows = (providers || []).map((p, i) => {
+    const priceHa = parseFloat(p.base_price_per_ha) || 0;
+    const estTotal = Math.round(priceHa * (farmSizeHa || 0));
+    const distStr = p.distance_km != null ? `${p.distance_km.toFixed(1)} km` : '—';
+    const ratingStr = p.avg_rating != null ? `⭐ ${p.avg_rating}` : '';
+    const bits = [`${estTotal.toLocaleString()} FCFA`, distStr];
+    if (ratingStr) bits.push(ratingStr);
+    return {
+      id: `prov_${i + 1}`,
+      title: String(p.full_name || `Provider ${i + 1}`).slice(0, 24),
+      description: bits.join(' · ').slice(0, 72),
+    };
+  });
+  return buildOptionListReply('Available providers near your farm. Select one to continue.', rows);
+}
+
 function getRequestSelectFarmMessage(farms) {
-  let msg = '*Select the farm:*\n\n';
-  farms.forEach((farm, i) => {
+  const rows = farms.map((farm, i) => {
     const loc = farm.location || farm.plot_name || '—';
     const crop = farm.crop_type || '—';
     const size = farm.plot_size_ha ?? farm.farm_size_ha ?? '—';
-    msg += `${i + 1}. Farm ${i + 1} (${loc} – ${crop} – ${size} ha)\n`;
+    return {
+      id: `farm_${i + 1}`,
+      title: `Farm ${i + 1}`,
+      description: `${loc} · ${crop} · ${size} ha`.slice(0, 72),
+    };
   });
-  msg += '\nReply with the number.';
-  return msg;
+  return buildOptionListReply('Select the farm for this service request.', rows);
 }
 
 async function handleIncoming(waFrom, body, latitude, longitude, profileName) {
   const phone = normalizePhone(waFrom);
-  const text = (body || '').trim();
+  const text = normalizeUserChoice((body || '').trim());
   const textLower = text.toLowerCase();
   const existing = await findExistingUser(phone);
   const session = await getSession(waFrom);
@@ -906,21 +943,8 @@ async function applyServiceRequestGpsFromWeb(waPhone, lat, lng) {
     client.release();
   }
 
-  let msg = '*Available providers near you:*\n\n';
-  providers.forEach((p, i) => {
-    const priceHa = parseFloat(p.base_price_per_ha) || 0;
-    const estTotal = Math.round(priceHa * farmSizeNum);
-    const distStr = p.distance_km != null ? `${p.distance_km.toFixed(1)} km` : '—';
-    const ratingStr = p.avg_rating != null ? `⭐ ${p.avg_rating}` : '—';
-    msg += `${i + 1}. ${p.full_name}\n`;
-    msg += `Price: ${priceHa.toLocaleString()} FCFA/ha\n`;
-    msg += `Estimated Total: ${estTotal.toLocaleString()} FCFA\n`;
-    msg += `Distance: ${distStr}\n`;
-    msg += `Rating: ${ratingStr}\n\n`;
-  });
-  msg += 'Reply with number to select.';
   try {
-    await sendBrandedText(`whatsapp:${digits}`, msg);
+    await sendBotReply(`whatsapp:${digits}`, buildProviderChoiceListReply(providers, farmSizeNum));
   } catch (err) {
     console.error('applyServiceRequestGpsFromWeb provider list send:', err);
     return { ok: false, error: 'send_failed' };
@@ -1134,37 +1158,18 @@ function getRequestInputMessage(data = {}) {
   const hasPresetFarm = data.farm_size_ha != null;
   const useSavedPin = hasUsableFarmGps(data.farm_gps_lat, data.farm_gps_lng);
   const followUp = useSavedPin
-    ? 'After you send this, we use your *saved farm pin* to match nearby providers.'
-    : 'After you send this, you will get a *link* to confirm the job location on the map.';
-  let msg =
-    '*Request a Service*\n\n' +
-    'Select service (number):\n' +
-    'Enter farm size:\n\n' +
-    '*Example:*\n' +
-    'Service: 1\n' +
-    'Farm size: 2\n\n' +
-    `${followUp}\n\n` +
-    'Services:\n' +
-    '1. Ploughing\n' +
-    '2. Planting\n' +
-    '3. Spraying\n' +
-    '4. Irrigation\n' +
-    '5. Harvesting\n' +
-    '6. Processing\n' +
-    '7. Storage\n' +
-    '8. Transport\n' +
-    '9. Other';
+    ? 'We will use your saved farm pin to match providers.'
+    : 'You will receive a link to confirm the job location on the map.';
+  let description =
+    '*Request a service*\n\n' +
+    'Choose a service below.';
   if (hasPresetFarm) {
-    msg =
-      '*Request a Service*\n\n' +
-      'Select service (number):\n\n' +
-      `Farm size on file: ${data.farm_size_ha} ha\n\n` +
-      '*Example:*\n' +
-      'Service: 1\n\n' +
-      `${followUp}\n\n` +
-      'Services: 1–9 as in the main menu help.';
+    description += `\n\nFarm size on file: ${data.farm_size_ha} ha.`;
+  } else {
+    description += '\n\nAfter selecting, reply with:\n*Farm size:* <hectares>';
   }
-  return msg;
+  description += `\n\n${followUp}`;
+  return buildOptionListReply(description, buildServiceRows());
 }
 async function handleRequestFlow(waFrom, session, data, text, latitude, longitude, existing) {
   if (!existing || existing.type !== 'farmer') {
@@ -1202,11 +1207,23 @@ async function handleRequestFlow(waFrom, session, data, text, latitude, longitud
 
     case 'request_input': {
       const kv = parseKeyValueBlock(text);
-      const serviceNum = parseInt(kv.service || '', 10);
+      let serviceNum = parseInt(kv.service || '', 10);
+      if (isNaN(serviceNum) && /^\d+$/.test(text)) serviceNum = parseInt(text, 10);
       const farmSizeRaw = parseFloat(kv.farm_size || '');
       const farmSize = !isNaN(farmSizeRaw) && farmSizeRaw >= 0 ? farmSizeRaw : (data.farm_size_ha != null ? parseFloat(data.farm_size_ha) : NaN);
-      if (isNaN(serviceNum) || serviceNum < 1 || serviceNum > 9) return 'Please include *Service:* (1-9). Example: Service: 1';
-      if (isNaN(farmSize) || farmSize < 0) return 'Please include *Farm size:* (ha). Example: Farm size: 2';
+      if (isNaN(serviceNum) || serviceNum < 1 || serviceNum > 9) {
+        return getRequestInputMessage({
+          farm_size_ha: data.farm_size_ha,
+          farm_gps_lat: data.farm_gps_lat,
+          farm_gps_lng: data.farm_gps_lng,
+        });
+      }
+      if (isNaN(farmSize) || farmSize < 0) {
+        return (
+          `You selected *${SERVICE_LIST[serviceNum - 1]}*.\n\n` +
+          'Please reply with your farm size in hectares.\n\n*Example:*\nFarm size: 2.5'
+        );
+      }
       const requestPending = {
         farmer_id: existing.id,
         farm_plot_id: data.farm_plot_id ?? null,
@@ -1281,7 +1298,7 @@ async function handleRequestFlow(waFrom, session, data, text, latitude, longitud
       const num = parseInt(text.trim(), 10);
       const providers = data.matched_providers || [];
       if (isNaN(num) || num < 1 || num > providers.length) {
-        return `Reply with a number from 1 to ${providers.length}.`;
+        return buildProviderChoiceListReply(providers, data.farm_size_ha || 0);
       }
       const provider = providers[num - 1];
       await updateSession(waFrom, {
@@ -1289,10 +1306,12 @@ async function handleRequestFlow(waFrom, session, data, text, latitude, longitud
         data: { ...data, selected_provider: provider },
       });
       const estTotal = Math.round((parseFloat(provider.base_price_per_ha) || 0) * (data.farm_size_ha || 0));
-      return (
-        `You selected *${provider.full_name}*\n\n` +
-        `Total Cost: ${estTotal.toLocaleString()} FCFA\n\n` +
-        '1. Confirm\n2. Cancel'
+      return buildOptionListReply(
+        `You selected *${provider.full_name}*\n\nTotal cost: ${estTotal.toLocaleString()} FCFA`,
+        [
+          { id: 'confirm_1', title: 'Confirm', description: 'Submit this booking' },
+          { id: 'confirm_2', title: 'Cancel', description: 'Go back to menu' },
+        ]
       );
     }
 
@@ -1402,11 +1421,17 @@ async function handleRecap(waFrom, existing, setStep = false) {
       msg += `Crop: ${crop}\n`;
       msg += `Size: ${size} ha\n\n`;
     });
-    msg += 'Options:\n1. Request service for a farm\n2. Edit farm details\n3. Add another farm\n\nReply *MENU* to go back.';
     if (setStep) {
       await updateSession(waFrom, { step: 'recap_options', data: { farmer_id: existing.id, farms } });
     }
-    return msg;
+    return buildOptionListReply(
+      msg.trim() + '\n\nChoose an action below. Reply *MENU* anytime to go back.',
+      [
+        { id: 'recap_1', title: 'Request service', description: 'Book work on a farm' },
+        { id: 'recap_2', title: 'Edit farm', description: 'Update size or crop' },
+        { id: 'recap_3', title: 'Add farm', description: 'Register another plot' },
+      ]
+    );
   }
   if (existing.type === 'provider') {
     const provRes = await pool.query(
@@ -1469,15 +1494,17 @@ async function handleAddFarmDetails(waFrom, existing, text, data) {
 }
 
 function getEditFarmSelectMessage(farms) {
-  let msg = '*Which farm would you like to update?*\n\n';
-  farms.forEach((farm, i) => {
+  const rows = farms.map((farm, i) => {
     const loc = farm.location || farm.plot_name || '—';
     const crop = farm.crop_type || '—';
     const size = farm.plot_size_ha ?? farm.farm_size_ha ?? '—';
-    msg += `${i + 1}. ${loc} – ${crop} – ${size} ha\n`;
+    return {
+      id: `farm_${i + 1}`,
+      title: `Farm ${i + 1}`,
+      description: `${loc} · ${crop} · ${size} ha`.slice(0, 72),
+    };
   });
-  msg += '\nReply with the number. Reply *MENU* to cancel.';
-  return msg;
+  return buildOptionListReply('Which farm would you like to update?', rows);
 }
 
 async function handleRecapOptionsFlow(waFrom, existing, text, data) {
@@ -1527,10 +1554,7 @@ async function handleRecapOptionsFlow(waFrom, existing, text, data) {
   if (t === '3') {
     return handleAddAnotherFarm(waFrom, existing);
   }
-  return (
-    'Reply *1* to request a service, *2* to edit a farm, *3* to add a farm, or *MENU*.\n\n' +
-    (await handleRecap(waFrom, existing, false))
-  );
+  return handleRecap(waFrom, existing, false);
 }
 
 async function handleEditFarmSelect(waFrom, existing, text, data) {
@@ -1598,11 +1622,10 @@ async function handleEditFarmInput(waFrom, existing, text, data) {
 
 async function handleUnsubscribeFlow(waFrom, existing) {
   await updateSession(waFrom, { step: 'unsubscribe_confirm', data: {} });
-  return (
-    'Are you sure you want to delete your account?\n\n' +
-    '1. Yes\n' +
-    '2. No'
-  );
+  return buildOptionListReply('Are you sure you want to delete your Digilync account?', [
+    { id: 'opt_1', title: 'Yes', description: 'Permanently remove account' },
+    { id: 'opt_2', title: 'No', description: 'Keep my account' },
+  ]);
 }
 
 async function handleUnsubscribeConfirm(waFrom, existing, text) {
