@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 
 const app = express();
+const { ensureOperationalSchema } = require('./services/operational-core');
 
 // CORS: allow frontend (localhost:3000 in dev, digilync.net in prod)
 // FRONTEND_URL is merged with defaults so a single origin in .env does not drop www / Render preview.
@@ -76,5 +77,13 @@ app.use('/api/public', require('./routes/public-metrics'));
 app.use('/api/public', require('./routes/public-farmer-gps'));
 app.use('/api/farm-plots', require('./routes/farm-plots'));
 app.use('/api/whatsapp', require('./routes/whatsapp-webhook'));
+app.use('/api/availability', require('./routes/availability'));
+app.use('/api/disputes', require('./routes/disputes'));
+app.use('/api/job-events', require('./routes/job-events'));
+
+// Best-effort bootstrapping for operational schema.
+ensureOperationalSchema().catch((err) => {
+  console.error('Operational schema bootstrap failed:', err.message);
+});
 
 module.exports = app;

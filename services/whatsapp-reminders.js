@@ -6,16 +6,36 @@
 const { pool } = require('../config/db');
 const { sendBrandedText, isEnabled } = require('./whatsapp-sender');
 
-/** Send reminders for bookings in the next 24 hours */
+const REMINDER_INTERVALS = [
+  { label: '4m', days: 120 },
+  { label: '3m', days: 90 },
+  { label: '2m', days: 60 },
+  { label: '1m', days: 30 },
+  { label: '2w', days: 14 },
+  { label: '5d', days: 5 },
+  { label: '2d', days: 2 },
+  { label: '1d', days: 1 },
+  { label: '2h', hours: 2 },
+];
+
+function classifyInterval(targetDate, now = new Date()) {
+  const diffMs = targetDate.getTime() - now.getTime();
+  if (diffMs < 0) return null;
+  const diffHours = diffMs / (1000 * 60 * 60);
+  const diffDays = diffHours / 24;
+  for (const i of REMINDER_INTERVALS) {
+    if (i.days != null && Math.abs(diffDays - i.days) <= 0.5) return i.label;
+    if (i.hours != null && Math.abs(diffHours - i.hours) <= 0.5) return i.label;
+  }
+  return null;
+}
+
+/** Send reminders across all configured intervals */
 async function sendUpcomingReminders() {
   if (!isEnabled()) {
     console.log('[Reminders] WhatsApp not configured, skipping');
     return { sent: 0, errors: 0 };
   }
-
-  const tomorrow = new Date();
-  tomorrow.setDate(tomorrow.getDate() + 1);
-  const dateStr = tomorrow.toISOString().slice(0, 10);
 
   const r = await pool.query(
     `SELECT b.id, b.service_type, b.scheduled_date, b.scheduled_time, b.farm_size_ha,
@@ -24,33 +44,56 @@ async function sendUpcomingReminders() {
      FROM bookings b
      JOIN farmers f ON b.farmer_id = f.id
      JOIN providers p ON b.provider_id = p.id
-     WHERE b.status = 'confirmed' AND b.scheduled_date = $1`,
-    [dateStr]
+     WHERE b.status IN ('confirmed', 'in_progress', 'awaiting_farmer_confirmation')
+       AND b.scheduled_date IS NOT NULL`
   );
 
   let sent = 0;
   let errors = 0;
 
   for (const b of r.rows) {
+    const target = new Date(`${String(b.scheduled_date).slice(0, 10)}T${String(b.scheduled_time || '00:00:00').slice(0, 8)}`);
+    const intervalLabel = classifyInterval(target);
+    if (!intervalLabel) continue;
+    const alreadyFarmer = await pool.query(
+      `SELECT 1 FROM booking_reminder_logs WHERE booking_id = $1 AND interval_label = $2 AND recipient_type = 'farmer'`,
+      [b.id, intervalLabel]
+    );
+    const alreadyProvider = await pool.query(
+      `SELECT 1 FROM booking_reminder_logs WHERE booking_id = $1 AND interval_label = $2 AND recipient_type = 'provider'`,
+      [b.id, intervalLabel]
+    );
     const timeStr = b.scheduled_time ? ` at ${String(b.scheduled_time).slice(0, 5)}` : '';
-    const base = `🔔 *Reminder:* Your booking is tomorrow${timeStr}.\n\n` +
+    const base = `🔔 *Reminder (${intervalLabel}):* Upcoming booking${timeStr}.\n\n` +
       `Service: ${b.service_type || 'Service'}\n` +
       `Size: ${b.farm_size_ha || '—'} ha\n`;
 
-    try {
-      await sendBrandedText(b.farmer_phone, base + `Provider: ${b.provider_name || '—'}\n\nPlease be on time. Reply *MENU* for options.`);
-      sent++;
-    } catch (e) {
-      console.error('[Reminders] Farmer send failed:', b.farmer_phone, e.message);
-      errors++;
+    if (alreadyFarmer.rows.length === 0) {
+      try {
+        await sendBrandedText(b.farmer_phone, base + `Provider: ${b.provider_name || '—'}\n\nPlease be on time. Reply *MENU* for options.`);
+        await pool.query(
+          `INSERT INTO booking_reminder_logs (booking_id, interval_label, recipient_type) VALUES ($1, $2, 'farmer')`,
+          [b.id, intervalLabel]
+        );
+        sent++;
+      } catch (e) {
+        console.error('[Reminders] Farmer send failed:', b.farmer_phone, e.message);
+        errors++;
+      }
     }
 
-    try {
-      await sendBrandedText(b.provider_phone, base + `Farmer: ${b.farmer_name || '—'}\n\nPlease be on time. Reply *MENU* for options.`);
-      sent++;
-    } catch (e) {
-      console.error('[Reminders] Provider send failed:', b.provider_phone, e.message);
-      errors++;
+    if (alreadyProvider.rows.length === 0) {
+      try {
+        await sendBrandedText(b.provider_phone, base + `Farmer: ${b.farmer_name || '—'}\n\nPlease be on time. Reply *MENU* for options.`);
+        await pool.query(
+          `INSERT INTO booking_reminder_logs (booking_id, interval_label, recipient_type) VALUES ($1, $2, 'provider')`,
+          [b.id, intervalLabel]
+        );
+        sent++;
+      } catch (e) {
+        console.error('[Reminders] Provider send failed:', b.provider_phone, e.message);
+        errors++;
+      }
     }
   }
 
