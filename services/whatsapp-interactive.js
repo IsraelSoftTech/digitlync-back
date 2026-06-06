@@ -13,6 +13,8 @@ const LIST_BUTTON = 'Select an option';
 const SERVICE_LIST = [
   'Ploughing', 'Planting', 'Spraying', 'Irrigation', 'Harvesting',
   'Processing', 'Storage', 'Transport', 'Other',
+  // Animal / Livestock services
+  'Vaccination', 'Deworming', 'Feeding', 'Milking', 'Livestock Transport', 'Animal Health',
 ];
 
 /**

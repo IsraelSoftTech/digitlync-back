@@ -73,7 +73,16 @@ async function ensureOperationalSchema() {
       ADD COLUMN IF NOT EXISTS cancellation_fee_amount_fcfa DECIMAL(12, 2),
       ADD COLUMN IF NOT EXISTS payment_status VARCHAR(32) DEFAULT 'unfunded',
       ADD COLUMN IF NOT EXISTS payout_due_at TIMESTAMP,
-      ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP
+      ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP,
+      ADD COLUMN IF NOT EXISTS completion_verified_at TIMESTAMP,
+      ADD COLUMN IF NOT EXISTS payment_released_at TIMESTAMP
+  `);
+
+  await pool.query(`
+    ALTER TABLE providers
+      ADD COLUMN IF NOT EXISTS min_service_qty DECIMAL(10, 2),
+      ADD COLUMN IF NOT EXISTS service_unit VARCHAR(64),
+      ADD COLUMN IF NOT EXISTS service_unit_label VARCHAR(255)
   `);
 
   await pool.query(`

@@ -21,6 +21,8 @@ const {
 const SERVICE_LIST = [
   'Ploughing', 'Planting', 'Spraying', 'Irrigation', 'Harvesting',
   'Processing', 'Storage', 'Transport', 'Other',
+  // Animal / Livestock services
+  'Vaccination', 'Deworming', 'Feeding', 'Milking', 'Livestock Transport', 'Animal Health',
 ];
 
 function normalizePhone(waFrom) {
@@ -311,62 +313,70 @@ async function findMatchingProviders(serviceType, farmerLat, farmerLng, preferre
 }
 
 async function createBookingAndNotify(waFrom, existing, provider, data) {
-  let bookingId;
   try {
-    const economics = calculateBookingEconomics({
-      providerBasePricePerHa: provider.base_price_per_ha,
-      farmSizeHa: data.farm_size_ha,
-    });
-    const ins = await pool.query(
-      `INSERT INTO bookings (
-         farmer_id, provider_id, service_type, status, scheduled_date, scheduled_time, farm_size_ha,
-         budget_min_fcfa, budget_max_fcfa, provider_base_amount_fcfa, platform_fee_amount_fcfa, farmer_payable_amount_fcfa, payment_status
-       )
-       VALUES ($1, $2, $3, 'pending', $4, $5, $6, $7, $8, $9, $10, $11, 'held') RETURNING id`,
-      [
-        existing.id,
-        provider.id,
-        data.service_type,
-        data.scheduled_date || null,
-        data.scheduled_time || null,
-        data.farm_size_ha,
-        data.budget_min_fcfa || null,
-        data.budget_max_fcfa || null,
-        economics.providerBaseAmount,
-        economics.platformFeeAmount,
-        economics.farmerPayableAmount,
-      ]
-    );
-    bookingId = ins.rows[0].id;
-    await updateSession(waFrom, { step: 'main_menu', data: {} });
-
-    const priceHa = parseFloat(provider.base_price_per_ha) || 0;
-    const farmSize = data.farm_size_ha || 0;
-    const estTotal = Math.round(priceHa * farmSize * (1 + PLATFORM_COMMISSION_RATE));
-
-    try {
-      await sendBotReply(
-        provider.phone,
-        buildOptionListReply(
-          `*New request #${bookingId}*\n\n` +
-            `Service: ${data.service_type}\n` +
-            `Farm size: ${farmSize} ha\n` +
-            `Date/Time: ${data.scheduled_date || 'TBD'} ${data.scheduled_time || ''}\n` +
-            `Distance: ${provider.distance_km != null ? provider.distance_km.toFixed(1) + ' km' : '—'}\n` +
-            `Expected payout: ${Math.round(priceHa * farmSize).toLocaleString()} FCFA`,
-          [
-            { id: `accept_${bookingId}`, title: 'Accept', description: 'Confirm this booking' },
-            { id: `reject_${bookingId}`, title: 'Reject', description: 'Decline this booking' },
-          ]
-        )
+    const services = (data.request_pending && Array.isArray(data.request_pending.service_types) && data.request_pending.service_types.length)
+      ? data.request_pending.service_types
+      : [data.service_type];
+    const created = [];
+    let totalCost = 0;
+    for (const svc of services) {
+      const economics = calculateBookingEconomics({
+        providerBasePricePerHa: provider.base_price_per_ha,
+        farmSizeHa: data.farm_size_ha,
+      });
+      const ins = await pool.query(
+        `INSERT INTO bookings (
+           farmer_id, provider_id, service_type, status, scheduled_date, scheduled_time, farm_size_ha,
+           budget_min_fcfa, budget_max_fcfa, provider_base_amount_fcfa, platform_fee_amount_fcfa, farmer_payable_amount_fcfa, payment_status
+         )
+         VALUES ($1, $2, $3, 'pending', $4, $5, $6, $7, $8, $9, $10, $11, 'held') RETURNING id`,
+        [
+          existing.id,
+          provider.id,
+          svc,
+          data.scheduled_date || null,
+          data.scheduled_time || null,
+          data.farm_size_ha,
+          data.budget_min_fcfa || null,
+          data.budget_max_fcfa || null,
+          economics.providerBaseAmount,
+          economics.platformFeeAmount,
+          economics.farmerPayableAmount,
+        ]
       );
-    } catch (e) {
-      console.error('WhatsApp notify provider failed:', e);
+      const bookingIdLoop = ins.rows[0].id;
+      created.push({ id: bookingIdLoop, service: svc, payout: economics.providerBaseAmount });
+      totalCost += Math.round((parseFloat(provider.base_price_per_ha) || 0) * (data.farm_size_ha || 0) * (1 + PLATFORM_COMMISSION_RATE));
+
+      try {
+        const priceHa = parseFloat(provider.base_price_per_ha) || 0;
+        const farmSize = data.farm_size_ha || 0;
+        await sendBotReply(
+          provider.phone,
+          buildOptionListReply(
+            `*New request #${bookingIdLoop}*\n\n` +
+              `Service: ${svc}\n` +
+              `Farm size: ${farmSize} ha\n` +
+              `Date/Time: ${data.scheduled_date || 'TBD'} ${data.scheduled_time || ''}\n` +
+              `Distance: ${provider.distance_km != null ? provider.distance_km.toFixed(1) + ' km' : '—'}\n` +
+              `Expected payout: ${Math.round(priceHa * farmSize).toLocaleString()} FCFA`,
+            [
+              { id: `accept_${bookingIdLoop}`, title: 'Accept', description: 'Confirm this booking' },
+              { id: `reject_${bookingIdLoop}`, title: 'Reject', description: 'Decline this booking' },
+            ]
+          )
+        );
+      } catch (e) {
+        console.error('WhatsApp notify provider failed:', e);
+      }
     }
 
-    return '✅ *Request submitted!*\n\n' +
-      `Provider *${provider.full_name}* has been notified.\n` +
-      `Total Cost (incl. 10% platform fee): ${estTotal.toLocaleString()} FCFA\n\n` +
+    await updateSession(waFrom, { step: 'main_menu', data: {} });
+
+    const plural = created.length > 1;
+    return `✅ *Request submitted!*\n\n` +
+      `Provider *${provider.full_name}* has been notified for ${created.length} service${plural ? 's' : ''}.\n` +
+      `Estimated Total (incl. platform fee): ${totalCost.toLocaleString()} FCFA\n\n` +
       'Cancellation policy: free >=24h, 10% at 6-24h, 30% at <6h.\n\n' +
       'Reply *MENU* for options.';
   } catch (err) {
@@ -444,11 +454,17 @@ function getFarmerFarmDetailsMessage() {
     '6. Processing\n' +
     '7. Storage\n' +
     '8. Transport\n' +
-    '9. Other (specify)\n\n' +
+    '9. Other (specify)\n' +
+    '10. Vaccination\n' +
+    '11. Deworming\n' +
+    '12. Feeding\n' +
+    '13. Milking\n' +
+    '14. Livestock Transport\n' +
+    '15. Animal Health\n\n' +
     '*Example:*\n' +
     'Farm size: 2.5\n' +
     'Crop: Maize; Cassava\n' +
-    'Services: 1,3,5'
+    'Services: 1,3,5 or 10,11 for livestock services'
   );
 }
 
@@ -504,7 +520,7 @@ function parseFarmDetailsBatch(text) {
     .replace(/[^\d,]/g, '')
     .split(',')
     .map((x) => parseInt(x.trim(), 10))
-    .filter((n) => !Number.isNaN(n) && n >= 1 && n <= 9);
+    .filter((n) => !Number.isNaN(n) && n >= 1 && n <= SERVICE_LIST.length);
   const serviceLabels = serviceNums.map((n) => SERVICE_LIST[n - 1]).filter(Boolean);
   return { farmSize, crop, serviceNums, serviceLabels };
 }
@@ -1209,7 +1225,7 @@ function getRequestInputMessage(data = {}) {
     : 'You will receive a link to confirm the job location on the map.';
   let description =
     '*Request a service*\n\n' +
-    'Choose a service below.\n' +
+    'Choose one or more services (reply numbers separated by commas).\n' +
     'After selecting, you will provide preferred date, time, and budget range.';
   if (hasPresetFarm) {
     description += `\n\nFarm size on file: ${data.farm_size_ha} ha.`;
@@ -1255,11 +1271,13 @@ async function handleRequestFlow(waFrom, session, data, text, latitude, longitud
 
     case 'request_input': {
       const kv = parseKeyValueBlock(text);
-      let serviceNum = parseInt(kv.service || '', 10);
-      if (isNaN(serviceNum) && /^\d+$/.test(text)) serviceNum = parseInt(text, 10);
+      // Accept comma-separated service numbers (e.g. "1,3,10") or a single number
+      const rawServices = (kv.service || kv.services || text || '').trim();
+      const nums = Array.from(new Set((rawServices.match(/\d+/g) || []).map((n) => parseInt(n, 10))))
+        .filter((n) => !Number.isNaN(n) && n >= 1 && n <= SERVICE_LIST.length);
       const farmSizeRaw = parseFloat(kv.farm_size || '');
       const farmSize = !isNaN(farmSizeRaw) && farmSizeRaw >= 0 ? farmSizeRaw : (data.farm_size_ha != null ? parseFloat(data.farm_size_ha) : NaN);
-      if (isNaN(serviceNum) || serviceNum < 1 || serviceNum > 9) {
+      if (!nums.length) {
         return getRequestInputMessage({
           farm_size_ha: data.farm_size_ha,
           farm_gps_lat: data.farm_gps_lat,
@@ -1267,15 +1285,18 @@ async function handleRequestFlow(waFrom, session, data, text, latitude, longitud
         });
       }
       if (isNaN(farmSize) || farmSize < 0) {
+        const sample = SERVICE_LIST[nums[0] - 1] || 'service';
         return (
-          `You selected *${SERVICE_LIST[serviceNum - 1]}*.\n\n` +
-          'Please reply with your farm size in hectares.\n\n*Example:*\nFarm size: 2.5'
+          `You selected *${nums.map((n) => SERVICE_LIST[n - 1]).join(', ')}*.\n\n` +
+          `Please reply with your farm size in hectares.\n\n*Example:*\nFarm size: 2.5`
         );
       }
+      const selectedServices = nums.map((n) => SERVICE_LIST[n - 1]);
       const requestPending = {
         farmer_id: existing.id,
         farm_plot_id: data.farm_plot_id ?? null,
-        service_type: SERVICE_LIST[serviceNum - 1],
+        service_type: selectedServices[0], // legacy single-service field (first selected)
+        service_types: selectedServices,
         farm_size_ha: farmSize,
       };
       await updateSession(waFrom, {
@@ -1283,7 +1304,7 @@ async function handleRequestFlow(waFrom, session, data, text, latitude, longitud
         data: { ...data, request_pending: requestPending },
       });
       return (
-        `You selected *${requestPending.service_type}*.\n\n` +
+        `You selected *${selectedServices.join(', ')}*.\n\n` +
         'Reply with:\n' +
         'Date: YYYY-MM-DD\n' +
         'Time: HH:MM\n' +

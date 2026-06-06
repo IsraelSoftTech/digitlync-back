@@ -79,14 +79,45 @@ router.put('/:id/resolve', async (req, res) => {
        RETURNING *`,
       [resolution_note || null, req.params.id]
     );
+
+    // Get booking details for notification
+    const bookingRes = await client.query(
+      `SELECT b.*, f.id as farmer_id, f.full_name as farmer_name, f.phone as farmer_phone,
+              p.id as provider_id, p.full_name as provider_name, p.phone as provider_phone
+       FROM bookings b
+       LEFT JOIN farmers f ON b.farmer_id = f.id
+       LEFT JOIN providers p ON b.provider_id = p.id
+       WHERE b.id = $1`,
+      [dispute.booking_id]
+    );
+    const booking = bookingRes.rows[0];
+
     if (payment_action === 'release') {
-      await client.query(`UPDATE bookings SET payment_status = 'release_pending', updated_at = CURRENT_TIMESTAMP WHERE id = $1`, [dispute.booking_id]);
-      await client.query(`UPDATE booking_payments SET payment_status = 'release_pending', updated_at = CURRENT_TIMESTAMP WHERE booking_id = $1`, [dispute.booking_id]);
+      await client.query(`UPDATE bookings SET payment_status = 'released', payment_released_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = $1`, [dispute.booking_id]);
+      await client.query(`UPDATE booking_payments SET payment_status = 'released', updated_at = CURRENT_TIMESTAMP WHERE booking_id = $1`, [dispute.booking_id]);
+
+      // Send payment released notifications
+      if (booking) {
+        const notifService = require('../services/notification-service');
+        const farmer = { id: booking.farmer_id, full_name: booking.farmer_name, phone: booking.farmer_phone };
+        const provider = { id: booking.provider_id, full_name: booking.provider_name, phone: booking.provider_phone };
+        await notifService.sendPaymentReleasedNotification(dispute.booking_id, farmer, provider, booking).catch(e => console.error('Payment released notification failed:', e.message));
+      }
     }
     if (payment_action === 'refund') {
       await client.query(`UPDATE bookings SET payment_status = 'refunded', updated_at = CURRENT_TIMESTAMP WHERE id = $1`, [dispute.booking_id]);
       await client.query(`UPDATE booking_payments SET payment_status = 'refunded', updated_at = CURRENT_TIMESTAMP WHERE booking_id = $1`, [dispute.booking_id]);
+
+      // Send refund notification to farmer
+      if (booking && booking.farmer_phone) {
+        const { sendBrandedText } = require('../services/whatsapp-sender');
+        await sendBrandedText(
+          booking.farmer_phone,
+          `💰 Dispute Resolved - Refund Issued\n\nYour dispute on booking #${dispute.booking_id} has been resolved. Your full payment has been refunded.\n\nReason: ${resolution_note || 'As per dispute resolution'}`
+        ).catch(e => console.error('Refund notification failed:', e.message));
+      }
     }
+
     await client.query('COMMIT');
     res.json(updated.rows[0]);
   } catch (err) {

@@ -80,6 +80,7 @@ app.use('/api/whatsapp', require('./routes/whatsapp-webhook'));
 app.use('/api/availability', require('./routes/availability'));
 app.use('/api/disputes', require('./routes/disputes'));
 app.use('/api/job-events', require('./routes/job-events'));
+app.use('/api/recommendations', require('./routes/recommendations'));
 
 // Best-effort bootstrapping for operational schema.
 ensureOperationalSchema().catch((err) => {

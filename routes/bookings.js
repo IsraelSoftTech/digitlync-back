@@ -316,4 +316,100 @@ router.delete('/:id', async (req, res) => {
   }
 });
 
+/**
+ * POST /api/bookings/:id/confirm
+ * Send confirmation messages to farmer and provider
+ */
+router.post('/:id/confirm', async (req, res) => {
+  try {
+    const { notificationService } = require('../services/notification-service') || {};
+    if (!notificationService) {
+      // Load individual functions
+      const {
+        sendBookingConfirmationToFarmer,
+        sendBookingConfirmationToProvider,
+      } = require('../services/notification-service');
+
+      const bookingRes = await pool.query(
+        `SELECT b.*, f.id as farmer_id, f.full_name as farmer_name, f.phone as farmer_phone,
+                p.id as provider_id, p.full_name as provider_name, p.phone as provider_phone
+         FROM bookings b
+         LEFT JOIN farmers f ON b.farmer_id = f.id
+         LEFT JOIN providers p ON b.provider_id = p.id
+         WHERE b.id = $1`,
+        [req.params.id]
+      );
+
+      if (bookingRes.rows.length === 0) {
+        return res.status(404).json({ error: 'Booking not found' });
+      }
+
+      const booking = bookingRes.rows[0];
+      const farmer = { id: booking.farmer_id, full_name: booking.farmer_name, phone: booking.farmer_phone };
+      const provider = { id: booking.provider_id, full_name: booking.provider_name, phone: booking.provider_phone };
+
+      await sendBookingConfirmationToFarmer(booking.id, farmer, provider, booking);
+      await sendBookingConfirmationToProvider(booking.id, farmer, provider, booking);
+
+      res.json({
+        success: true,
+        bookingId: booking.id,
+        message: 'Confirmation messages sent to farmer and provider',
+      });
+    }
+  } catch (err) {
+    console.error('Booking confirmation error:', err);
+    res.status(500).json({ error: 'Failed to send confirmation: ' + err.message });
+  }
+});
+
+/**
+ * POST /api/bookings/:id/complete
+ * Farmer confirms job completion, triggers payment release
+ */
+router.post('/:id/complete', async (req, res) => {
+  try {
+    const { paymentProcessor } = require('../services/payment-processor');
+    const {
+      processPaymentRelease,
+      sendPaymentReleasedNotification,
+    } = require('../services/payment-processor');
+    const notifService = require('../services/notification-service');
+
+    const bookingId = parseInt(req.params.id);
+
+    // Release payment
+    const paymentResult = await processPaymentRelease(bookingId);
+
+    // Get booking and related data for notification
+    const bookingRes = await pool.query(
+      `SELECT b.*, f.id as farmer_id, f.full_name as farmer_name, f.phone as farmer_phone,
+              p.id as provider_id, p.full_name as provider_name, p.phone as provider_phone
+       FROM bookings b
+       LEFT JOIN farmers f ON b.farmer_id = f.id
+       LEFT JOIN providers p ON b.provider_id = p.id
+       WHERE b.id = $1`,
+      [bookingId]
+    );
+
+    if (bookingRes.rows.length > 0) {
+      const booking = bookingRes.rows[0];
+      const farmer = { id: booking.farmer_id, full_name: booking.farmer_name, phone: booking.farmer_phone };
+      const provider = { id: booking.provider_id, full_name: booking.provider_name, phone: booking.provider_phone };
+
+      // Send payment notifications
+      await notifService.sendPaymentReleasedNotification(bookingId, farmer, provider, booking);
+    }
+
+    res.json({
+      success: true,
+      ...paymentResult,
+      message: 'Payment released and notifications sent',
+    });
+  } catch (err) {
+    console.error('Booking completion error:', err);
+    res.status(500).json({ error: 'Failed to complete booking: ' + err.message });
+  }
+});
+
 module.exports = router;
