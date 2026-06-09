@@ -7,7 +7,7 @@ const { pool } = require('../config/db');
 const { sendBrandedText } = require('./whatsapp-sender');
 const {
   buildOptionListReply,
-  buildServiceRows,
+  buildServiceListReply,
   normalizeUserChoice,
   sendBotReply,
 } = require('./whatsapp-interactive');
@@ -109,7 +109,11 @@ async function insertFarmerFullFromPending(waPhone, pending) {
   const totalHa = farms.reduce((s, f) => s + (parseFloat(f.plot_size_ha) || 0), 0);
   const allCrops = farms.map((f) => (f.crop_type || '').trim()).filter(Boolean).join('; ') || 'Not specified';
   const serviceSet = new Set();
-  farms.forEach((f) => (f.service_labels || []).forEach((x) => serviceSet.add(x)));
+  farms.forEach((f) => {
+    (f.service_labels || []).forEach((x) => {
+      serviceSet.add(x === 'Other' && f.other_services ? f.other_services : x);
+    });
+  });
   const serviceNeeds = Array.from(serviceSet);
   const otherBits = farms.map((f) => f.other_services).filter(Boolean);
   const notesParts = ['Registered via DigiLync WhatsApp (structured flow).'];
@@ -440,11 +444,33 @@ function parseFarmerBasicForm(text) {
   return { fullName, region, division, subdivision, district };
 }
 
+function parseCropOrLivestock(kv) {
+  return (
+    kv.crop ||
+    kv.crops ||
+    kv.crop_type ||
+    kv['crop(s)'] ||
+    kv['crop(s)_or_livestock'] ||
+    kv.livestock ||
+    kv.animals ||
+    kv.animal ||
+    kv['animal(s)'] ||
+    ''
+  ).trim();
+}
+
+function formatFarmServiceLabels(farm) {
+  const parts = (farm.service_labels || []).map((label) =>
+    label === 'Other' && farm.other_services ? farm.other_services : label
+  );
+  return parts.filter(Boolean).join(', ') || '—';
+}
+
 function getFarmerFarmDetailsMessage() {
   return (
     'Now enter your farm details:\n\n' +
     'Farm size (hectares):\n' +
-    'Crop(s):\n\n' +
+    'Crop(s) or Livestock:\n\n' +
     'Select services needed (reply with numbers separated by comma):\n\n' +
     '1. Ploughing\n' +
     '2. Planting\n' +
@@ -461,10 +487,16 @@ function getFarmerFarmDetailsMessage() {
     '13. Milking\n' +
     '14. Livestock Transport\n' +
     '15. Animal Health\n\n' +
-    '*Example:*\n' +
+    '*Examples:*\n' +
+    '_Crops:_\n' +
     'Farm size: 2.5\n' +
     'Crop: Maize; Cassava\n' +
-    'Services: 1,3,5 or 10,11 for livestock services'
+    'Services: 1,3,5\n\n' +
+    '_Livestock:_\n' +
+    'Farm size: 5\n' +
+    'Livestock: Cattle; Goats\n' +
+    'Services: 10,11\n\n' +
+    '_Other (option 9):_ include *9* in Services — we will ask you to describe it next.'
   );
 }
 
@@ -501,9 +533,8 @@ function buildFarmerConfirmationMessage(pending) {
   lines.push(`Location: ${district}`);
   const farms = pending.farms || [];
   farms.forEach((f, i) => {
-    const svc = (f.service_labels || []).join(', ') || '—';
     lines.push(
-      `Farm ${i + 1}: ${f.plot_size_ha} ha — ${(f.crop_type || '—').trim()} — ${svc}`
+      `Farm ${i + 1}: ${f.plot_size_ha} ha — ${(f.crop_type || '—').trim()} — ${formatFarmServiceLabels(f)}`
     );
   });
   return buildOptionListReply(lines.join('\n'), [
@@ -515,7 +546,7 @@ function buildFarmerConfirmationMessage(pending) {
 function parseFarmDetailsBatch(text) {
   const kv = parseKeyValueBlock(text);
   const farmSize = parseFloat(kv.farm_size || kv['farm_size_(hectares)'] || '');
-  const crop = (kv.crop || kv.crops || kv.crop_type || kv['crop(s)'] || '').trim();
+  const crop = parseCropOrLivestock(kv);
   const serviceNums = (kv.services || '')
     .replace(/[^\d,]/g, '')
     .split(',')
@@ -1088,7 +1119,10 @@ async function handleFarmerFlow(waFrom, session, data, text, latitude, longitude
       }
       const b = parseFarmDetailsBatch(text);
       if (Number.isNaN(b.farmSize) || b.farmSize < 0 || !b.crop || b.serviceNums.length === 0) {
-        return 'Please send farm size (number), crop(s), and services (numbers).\n\n' + getFarmerFarmDetailsMessage();
+        return (
+          'Please send farm size (number), crop(s) or livestock, and services (numbers).\n\n' +
+          getFarmerFarmDetailsMessage()
+        );
       }
       const draftFarm = {
         gps_lat: draft.gps_lat,
@@ -1186,13 +1220,19 @@ function getProviderBatchedMessage() {
     '6. Processing\n' +
     '7. Storage\n' +
     '8. Transport\n' +
-    '9. Other\n\n' +
+    '9. Other (specify)\n' +
+    '10. Vaccination\n' +
+    '11. Deworming\n' +
+    '12. Feeding\n' +
+    '13. Milking\n' +
+    '14. Livestock Transport\n' +
+    '15. Animal Health\n\n' +
     '*Example:*\n' +
     'Name: John\n' +
     'Radius: 10\n' +
     'Price: 12000\n' +
     'Capacity: 3\n' +
-    'Services: 1,5\n\n' +
+    'Services: 1,5 or 10,11\n\n' +
     'After you send this, you will get a *link* to set your base location on the map.'
   );
 }
@@ -1233,7 +1273,9 @@ function getRequestInputMessage(data = {}) {
     description += '\n\nAfter selecting, reply with:\n*Farm size:* <hectares>';
   }
   description += `\n\n${followUp}`;
-  return buildOptionListReply(description, buildServiceRows());
+  description +=
+    '\n\n_Reply with service numbers (e.g. 1,3 or 10,11). Option 9 = Other — describe it when prompted._';
+  return buildServiceListReply(description);
 }
 async function handleRequestFlow(waFrom, session, data, text, latitude, longitude, existing) {
   if (!existing || existing.type !== 'farmer') {
@@ -1284,8 +1326,14 @@ async function handleRequestFlow(waFrom, session, data, text, latitude, longitud
           farm_gps_lng: data.farm_gps_lng,
         });
       }
+      if (nums.includes(9)) {
+        await updateSession(waFrom, {
+          step: 'request_other_spec',
+          data: { ...data, pending_service_nums: nums, pending_farm_size: farmSize },
+        });
+        return getFarmerOtherServicesMessage();
+      }
       if (isNaN(farmSize) || farmSize < 0) {
-        const sample = SERVICE_LIST[nums[0] - 1] || 'service';
         return (
           `You selected *${nums.map((n) => SERVICE_LIST[n - 1]).join(', ')}*.\n\n` +
           `Please reply with your farm size in hectares.\n\n*Example:*\nFarm size: 2.5`
@@ -1302,6 +1350,88 @@ async function handleRequestFlow(waFrom, session, data, text, latitude, longitud
       await updateSession(waFrom, {
         step: 'request_schedule_budget',
         data: { ...data, request_pending: requestPending },
+      });
+      return (
+        `You selected *${selectedServices.join(', ')}*.\n\n` +
+        'Reply with:\n' +
+        'Date: YYYY-MM-DD\n' +
+        'Time: HH:MM\n' +
+        'Budget Min: amount\n' +
+        'Budget Max: amount'
+      );
+    }
+
+    case 'request_other_spec': {
+      const more = text.trim();
+      if (!more) return getFarmerOtherServicesMessage();
+      const nums = data.pending_service_nums || [];
+      const farmSize =
+        data.pending_farm_size != null && !Number.isNaN(data.pending_farm_size)
+          ? data.pending_farm_size
+          : data.farm_size_ha != null
+            ? parseFloat(data.farm_size_ha)
+            : NaN;
+      if (Number.isNaN(farmSize) || farmSize < 0) {
+        await updateSession(waFrom, {
+          step: 'request_farm_size_after_other',
+          data: { ...data, other_service_detail: more },
+        });
+        return (
+          `Other service noted: *${more}*\n\n` +
+          `Please reply with your farm size in hectares.\n\n*Example:*\nFarm size: 2.5`
+        );
+      }
+      const selectedServices = nums.map((n) => (n === 9 ? more : SERVICE_LIST[n - 1]));
+      const requestPending = {
+        farmer_id: existing.id,
+        farm_plot_id: data.farm_plot_id ?? null,
+        service_type: selectedServices[0],
+        service_types: selectedServices,
+        farm_size_ha: farmSize,
+        other_service_detail: more,
+      };
+      await updateSession(waFrom, {
+        step: 'request_schedule_budget',
+        data: { ...data, request_pending: requestPending, pending_service_nums: undefined, pending_farm_size: undefined },
+      });
+      return (
+        `You selected *${selectedServices.join(', ')}*.\n\n` +
+        'Reply with:\n' +
+        'Date: YYYY-MM-DD\n' +
+        'Time: HH:MM\n' +
+        'Budget Min: amount\n' +
+        'Budget Max: amount'
+      );
+    }
+
+    case 'request_farm_size_after_other': {
+      const kv = parseKeyValueBlock(text);
+      const farmSize = parseFloat(kv.farm_size || text.trim() || '');
+      if (Number.isNaN(farmSize) || farmSize < 0) {
+        return (
+          `Please reply with your farm size in hectares.\n\n*Example:*\nFarm size: 2.5`
+        );
+      }
+      const nums = data.pending_service_nums || [];
+      const more = data.other_service_detail || 'Other';
+      const selectedServices = nums.map((n) => (n === 9 ? more : SERVICE_LIST[n - 1]));
+      const requestPending = {
+        farmer_id: existing.id,
+        farm_plot_id: data.farm_plot_id ?? null,
+        service_type: selectedServices[0],
+        service_types: selectedServices,
+        farm_size_ha: farmSize,
+        other_service_detail: more,
+      };
+      await updateSession(waFrom, {
+        step: 'request_schedule_budget',
+        data: {
+          ...data,
+          request_pending: requestPending,
+          pending_service_nums: undefined,
+          pending_farm_size: undefined,
+          other_service_detail: undefined,
+        },
       });
       return (
         `You selected *${selectedServices.join(', ')}*.\n\n` +
@@ -1448,7 +1578,7 @@ async function handleProviderFlow(waFrom, session, data, text, latitude, longitu
     if (isNaN(radius) || radius < 0) return 'Please include *Radius:* (km). Example: Radius: 10\n\n' + getProviderBatchedMessage();
     if (isNaN(price) || price < 0) return 'Please include *Price:* (FCFA/ha). Example: Price: 12000\n\n' + getProviderBatchedMessage();
     if (isNaN(capacity) || capacity < 0) return 'Please include *Capacity:* (ha/day). Example: Capacity: 3\n\n' + getProviderBatchedMessage();
-    const serviceNums = (kv.services || '').replace(/[^\d,]/g, '').split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => !isNaN(n) && n >= 1 && n <= 9);
+    const serviceNums = (kv.services || '').replace(/[^\d,]/g, '').split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => !isNaN(n) && n >= 1 && n <= SERVICE_LIST.length);
     const services = serviceNums.map((n) => SERVICE_LIST[n - 1]).filter(Boolean);
     const token = crypto.randomUUID();
     const gpsUrl = `${getFrontendBaseUrl()}/gps?t=${encodeURIComponent(token)}&role=provider`;
@@ -1554,10 +1684,12 @@ function getAddFarmDetailsMessage() {
     'Add another farm:\n\n' +
     'Enter in this format:\n\n' +
     'Farm size (hectares):\n' +
-    'Crop(s):\n\n' +
-    '*Example:*\n' +
+    'Crop(s) or Livestock:\n\n' +
+    '*Examples:*\n' +
     'Farm size: 2.5\n' +
-    'Crop: Maize, Cassava'
+    'Crop: Maize, Cassava\n\n' +
+    'Farm size: 5\n' +
+    'Livestock: Cattle; Goats'
   );
 }
 
@@ -1569,7 +1701,7 @@ async function handleAddAnotherFarm(waFrom, existing) {
 async function handleAddFarmDetails(waFrom, existing, text, data) {
   const kv = parseKeyValueBlock(text);
   const farmSize = parseFloat(kv.farm_size || kv.farm_size_hectares || '');
-  const crop = kv.crop || kv.crops || kv.crop_type || '';
+  const crop = parseCropOrLivestock(kv);
   if (isNaN(farmSize) || farmSize < 0) return 'Please include *Farm size:* (number). Example: Farm size: 2.5\n\n' + getAddFarmDetailsMessage();
   try {
     const farmerRes = await pool.query('SELECT gps_lat, gps_lng FROM farmers WHERE id = $1', [existing.id]);
@@ -1678,23 +1810,27 @@ async function handleEditFarmSelect(waFrom, existing, text, data) {
     `Update *Farm ${num}* (current: ${size} ha — ${crop})\n\n` +
     'Send in this format:\n\n' +
     'Farm size (hectares):\n' +
-    'Crop(s):\n\n' +
-    '*Example:*\n' +
+    'Crop(s) or Livestock:\n\n' +
+    '*Examples:*\n' +
     'Farm size: 3\n' +
-    'Crop: Maize'
+    'Crop: Maize\n\n' +
+    'Farm size: 5\n' +
+    'Livestock: Cattle'
   );
 }
 
 async function handleEditFarmInput(waFrom, existing, text, data) {
   const kv = parseKeyValueBlock(text);
   const farmSize = parseFloat(kv.farm_size || kv.farm_size_hectares || '');
-  const crop = (kv.crop || kv.crops || kv.crop_type || '').trim();
+  const crop = parseCropOrLivestock(kv);
   if (isNaN(farmSize) || farmSize < 0 || !crop) {
     return (
-      'Please send *Farm size:* and *Crop:* (both required).\n\n' +
-      '*Example:*\n' +
+      'Please send *Farm size:* and *Crop:* or *Livestock:* (both required).\n\n' +
+      '*Examples:*\n' +
       'Farm size: 3\n' +
-      'Crop: Maize'
+      'Crop: Maize\n\n' +
+      'Farm size: 5\n' +
+      'Livestock: Cattle'
     );
   }
   try {

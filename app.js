@@ -3,6 +3,7 @@ const cors = require('cors');
 
 const app = express();
 const { ensureOperationalSchema } = require('./services/operational-core');
+const { ensurePlatformSettingsSchema } = require('./services/platform-settings');
 
 // CORS: allow frontend (localhost:3000 in dev, digilync.net in prod)
 // FRONTEND_URL is merged with defaults so a single origin in .env does not drop www / Render preview.
@@ -81,10 +82,14 @@ app.use('/api/availability', require('./routes/availability'));
 app.use('/api/disputes', require('./routes/disputes'));
 app.use('/api/job-events', require('./routes/job-events'));
 app.use('/api/recommendations', require('./routes/recommendations'));
+app.use('/api/settings', require('./routes/settings'));
 
 // Best-effort bootstrapping for operational schema.
 ensureOperationalSchema().catch((err) => {
   console.error('Operational schema bootstrap failed:', err.message);
+});
+ensurePlatformSettingsSchema().catch((err) => {
+  console.error('Platform settings schema bootstrap failed:', err.message);
 });
 
 module.exports = app;

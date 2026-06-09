@@ -41,12 +41,39 @@ function buildOptionListReply(description, rows, opts = {}) {
   };
 }
 
+function sanitizeListRows(rows) {
+  return (rows || []).slice(0, 10).map((r) => ({
+    id: String(r.id).slice(0, 200),
+    title: String(r.title).slice(0, 24),
+    description: r.description ? String(r.description).slice(0, 72) : undefined,
+  }));
+}
+
 function buildServiceRows(prefix = 'svc') {
   return SERVICE_LIST.map((name, i) => ({
     id: `${prefix}_${i + 1}`,
     title: name,
     description: `Service option ${i + 1}`,
   }));
+}
+
+/** Full service picker — two sections so all 15 options appear (Meta list cap: 10 rows/section). */
+function buildServiceListReply(description, opts = {}) {
+  const cropRows = buildServiceRows('svc').slice(0, 9);
+  const livestockRows = buildServiceRows('svc').slice(9);
+  const bodyParts = [DIGILYNC_TAGLINE];
+  if (description) bodyParts.push('', String(description).trim());
+  if (opts.footer) bodyParts.push('', String(opts.footer).trim());
+  return {
+    type: 'interactive_list',
+    header: LIST_HEADER,
+    body: bodyParts.join('\n').slice(0, 1024),
+    buttonText: LIST_BUTTON,
+    sections: [
+      { title: 'Crop & General', rows: sanitizeListRows(cropRows) },
+      { title: 'Livestock', rows: sanitizeListRows(livestockRows) },
+    ],
+  };
 }
 
 /**
@@ -115,6 +142,7 @@ module.exports = {
   SERVICE_LIST,
   buildOptionListReply,
   buildServiceRows,
+  buildServiceListReply,
   normalizeUserChoice,
   isListReply,
   sendBotReply,
