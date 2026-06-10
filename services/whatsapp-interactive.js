@@ -78,6 +78,8 @@ function buildServiceListReply(description, opts = {}) {
 
 /**
  * Map list/button IDs and legacy numeric replies to values handleIncoming expects.
+ * Note: main_* list IDs are handled before normalization in handleIncoming so they
+ * never collide with svc_* service numbers (e.g. main_6 Unsubscribe vs svc_6 Processing).
  */
 function normalizeUserChoice(raw) {
   const t = String(raw || '').trim();
@@ -114,6 +116,16 @@ function normalizeUserChoice(raw) {
   return t;
 }
 
+/** Extract numeric choice from a prefixed list reply id (e.g. main_3 → "3"), or null. */
+function matchListId(raw, prefix) {
+  const m = String(raw || '').trim().match(new RegExp(`^${prefix}_(\\d+)$`, 'i'));
+  return m ? m[1] : null;
+}
+
+function isPrefixedListId(raw) {
+  return /^(main|opt|svc|farm|recap|privacy|prov|confirm|accept|reject)_\d+$/i.test(String(raw || '').trim());
+}
+
 function isListReply(reply) {
   return reply && typeof reply === 'object' && reply.type === 'interactive_list';
 }
@@ -144,6 +156,8 @@ module.exports = {
   buildServiceRows,
   buildServiceListReply,
   normalizeUserChoice,
+  matchListId,
+  isPrefixedListId,
   isListReply,
   sendBotReply,
 };

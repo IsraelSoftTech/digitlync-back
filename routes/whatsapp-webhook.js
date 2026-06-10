@@ -7,7 +7,7 @@
  */
 const express = require('express');
 const router = express.Router();
-const { handleIncoming } = require('../services/whatsapp-conversation');
+const { handleIncoming, getSession, updateSession } = require('../services/whatsapp-conversation');
 const { buildBrandedBody, isEnabled } = require('../services/whatsapp-sender');
 const { sendBotReply, isListReply } = require('../services/whatsapp-interactive');
 const config = require('../config/whatsapp');
@@ -37,6 +37,24 @@ function isDuplicateInboundWamid(id) {
   seenInboundWamids.set(id, now);
   pruneSeenWamids(now);
   return false;
+}
+
+function snapshotSession(session) {
+  if (!session) return null;
+  return {
+    user_type: session.user_type,
+    step: session.step,
+    data: session.data,
+  };
+}
+
+async function restoreSession(waFrom, snap) {
+  if (!snap) return;
+  await updateSession(waFrom, {
+    user_type: snap.user_type,
+    step: snap.step,
+    data: snap.data,
+  });
 }
 
 /** GET - Meta webhook verification (hub.mode, hub.verify_token, hub.challenge) */
@@ -151,17 +169,31 @@ router.post('/webhook', async (req, res) => {
           continue;
         }
 
+        let sessionBefore = null;
         try {
+          sessionBefore = snapshotSession(await getSession(waFrom));
           const reply = await handleIncoming(waFrom, text, latitude, longitude, profileName);
           if (reply) {
             const replyKind = isListReply(reply) ? 'interactive_list' : 'text';
             console.log('[WhatsApp] Sending reply to', '***' + String(from).slice(-4), 'kind:', replyKind);
-            await sendBotReply(waFrom, reply);
-            console.log('[WhatsApp] Reply sent to', '***' + String(from).slice(-4));
+            try {
+              await sendBotReply(waFrom, reply);
+              console.log('[WhatsApp] Reply sent to', '***' + String(from).slice(-4));
+            } catch (sendErr) {
+              await restoreSession(waFrom, sessionBefore);
+              throw sendErr;
+            }
           } else {
             console.log('[WhatsApp] No reply to send (handleIncoming returned null)');
           }
         } catch (err) {
+          if (sessionBefore) {
+            try {
+              await restoreSession(waFrom, sessionBefore);
+            } catch (restoreErr) {
+              console.error('[WhatsApp] Failed to restore session after error:', restoreErr.message);
+            }
+          }
           console.error('[WhatsApp] Webhook error:', err.message);
           console.error('[WhatsApp] Full error:', err);
           try {
