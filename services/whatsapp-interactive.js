@@ -37,16 +37,34 @@ function buildOptionListReply(description, rows, opts = {}) {
     header: LIST_HEADER,
     body: bodyParts.join('\n').slice(0, 1024),
     buttonText: LIST_BUTTON,
-    sections: [{ title: 'Options', rows: safeRows }],
+    sections: clampSectionsToMetaLimit([{ title: 'Options', rows: safeRows }]),
   };
 }
 
+/** Meta Cloud API: max 10 rows across all sections in one list message. */
+const MAX_LIST_ROWS_TOTAL = 10;
+
 function sanitizeListRows(rows) {
-  return (rows || []).slice(0, 10).map((r) => ({
+  return (rows || []).slice(0, MAX_LIST_ROWS_TOTAL).map((r) => ({
     id: String(r.id).slice(0, 200),
     title: String(r.title).slice(0, 24),
     description: r.description ? String(r.description).slice(0, 72) : undefined,
   }));
+}
+
+/** Trim sections so combined row count never exceeds Meta's list limit. */
+function clampSectionsToMetaLimit(sections) {
+  const out = [];
+  let remaining = MAX_LIST_ROWS_TOTAL;
+  for (const sec of sections || []) {
+    if (remaining <= 0) break;
+    const rows = sanitizeListRows(sec.rows).slice(0, remaining);
+    if (rows.length) {
+      out.push({ title: String(sec.title || 'Options').slice(0, 24), rows });
+      remaining -= rows.length;
+    }
+  }
+  return out;
 }
 
 function buildServiceRows(prefix = 'svc') {
@@ -57,10 +75,28 @@ function buildServiceRows(prefix = 'svc') {
   }));
 }
 
-/** Full service picker — two sections so all 15 options appear (Meta list cap: 10 rows/section). */
+/**
+ * Service picker (15 options) — paginated to respect Meta's 10-row list cap.
+ * Page 1: services 1–9 + "More services"; page 2: services 10–15 + "Earlier services".
+ */
 function buildServiceListReply(description, opts = {}) {
-  const cropRows = buildServiceRows('svc').slice(0, 9);
-  const livestockRows = buildServiceRows('svc').slice(9);
+  const page = opts.page === 2 ? 2 : 1;
+  let rows;
+  if (page === 2) {
+    rows = SERVICE_LIST.slice(9).map((name, i) => ({
+      id: `svc_${i + 10}`,
+      title: name,
+      description: `Service option ${i + 10}`,
+    }));
+    rows.push({ id: 'svc_page_1', title: 'Earlier services', description: 'Options 1–9' });
+  } else {
+    rows = SERVICE_LIST.slice(0, 9).map((name, i) => ({
+      id: `svc_${i + 1}`,
+      title: name,
+      description: `Service option ${i + 1}`,
+    }));
+    rows.push({ id: 'svc_page_2', title: 'More services', description: 'Livestock & more' });
+  }
   const bodyParts = [DIGILYNC_TAGLINE];
   if (description) bodyParts.push('', String(description).trim());
   if (opts.footer) bodyParts.push('', String(opts.footer).trim());
@@ -69,10 +105,7 @@ function buildServiceListReply(description, opts = {}) {
     header: LIST_HEADER,
     body: bodyParts.join('\n').slice(0, 1024),
     buttonText: LIST_BUTTON,
-    sections: [
-      { title: 'Crop & General', rows: sanitizeListRows(cropRows) },
-      { title: 'Livestock', rows: sanitizeListRows(livestockRows) },
-    ],
+    sections: clampSectionsToMetaLimit([{ title: page === 2 ? 'Livestock & more' : 'Services', rows }]),
   };
 }
 
@@ -151,10 +184,12 @@ module.exports = {
   LIST_HEADER,
   DIGILYNC_TAGLINE,
   LIST_BUTTON,
+  MAX_LIST_ROWS_TOTAL,
   SERVICE_LIST,
   buildOptionListReply,
   buildServiceRows,
   buildServiceListReply,
+  clampSectionsToMetaLimit,
   normalizeUserChoice,
   matchListId,
   isPrefixedListId,

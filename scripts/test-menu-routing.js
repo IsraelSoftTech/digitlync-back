@@ -4,7 +4,13 @@
  * Run: node scripts/test-menu-routing.js
  * DB tests run only when DATABASE_URL is reachable.
  */
-const { matchListId, isPrefixedListId, normalizeUserChoice } = require('../services/whatsapp-interactive');
+const {
+  matchListId,
+  isPrefixedListId,
+  normalizeUserChoice,
+  buildServiceListReply,
+  MAX_LIST_ROWS_TOTAL,
+} = require('../services/whatsapp-interactive');
 
 function assert(cond, msg) {
   if (!cond) throw new Error(msg);
@@ -29,6 +35,21 @@ function testListIdHelpers() {
   assert(normalizeUserChoice('svc_6') === '6', 'normalize svc_6');
   assert(normalizeUserChoice('recap_1') === '1', 'normalize recap_1');
   console.log('OK list ID helper unit tests');
+}
+
+function testServiceListMetaLimits() {
+  for (const page of [1, 2, undefined]) {
+    const reply = buildServiceListReply('Test service picker', page === undefined ? {} : { page });
+    const totalRows = (reply.sections || []).reduce((n, s) => n + (s.rows || []).length, 0);
+    assert(totalRows <= MAX_LIST_ROWS_TOTAL, `service list page ${page ?? 1} has ${totalRows} rows (max ${MAX_LIST_ROWS_TOTAL})`);
+    assert(reply.sections.length >= 1, 'service list has at least one section');
+  }
+  const page1Ids = buildServiceListReply('', { page: 1 }).sections[0].rows.map((r) => r.id);
+  assert(page1Ids.includes('svc_page_2'), 'page 1 includes More services nav');
+  const page2Ids = buildServiceListReply('', { page: 2 }).sections[0].rows.map((r) => r.id);
+  assert(page2Ids.includes('svc_15'), 'page 2 includes last service');
+  assert(page2Ids.includes('svc_page_1'), 'page 2 includes Earlier services nav');
+  console.log('OK service list respects Meta 10-row cap');
 }
 
 async function testWithDb() {
@@ -78,6 +99,7 @@ async function testWithDb() {
 
 async function run() {
   testListIdHelpers();
+  testServiceListMetaLimits();
   try {
     await testWithDb();
   } catch (err) {

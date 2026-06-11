@@ -1404,7 +1404,7 @@ function hasUsableFarmGps(lat, lng) {
   return true;
 }
 
-function getRequestInputMessage(data = {}) {
+function getRequestInputMessage(data = {}, opts = {}) {
   const hasPresetFarm = data.farm_size_ha != null;
   const useSavedPin = hasUsableFarmGps(data.farm_gps_lat, data.farm_gps_lng);
   const followUp = useSavedPin
@@ -1421,8 +1421,11 @@ function getRequestInputMessage(data = {}) {
   }
   description += `\n\n${followUp}`;
   description +=
-    '\n\n_Reply with service numbers (e.g. 1,3 or 10,11). Option 9 = Other — describe it when prompted._';
-  return buildServiceListReply(description);
+    '\n\n_Tap a service below, or reply with numbers (e.g. 1,3 or 10,11). Option 9 = Other — describe when prompted._';
+  if (opts.page === 2) {
+    description += '\n\n_Showing services 10–15. Tap *Earlier services* for options 1–9._';
+  }
+  return buildServiceListReply(description, { page: opts.page });
 }
 async function handleRequestFlow(waFrom, session, data, text, latitude, longitude, existing, rawBody = '') {
   if (!existing || existing.type !== 'farmer') {
@@ -1460,6 +1463,24 @@ async function handleRequestFlow(waFrom, session, data, text, latitude, longitud
     }
 
     case 'request_input': {
+      const rawTrim = String(rawBody || '').trim();
+      if (/^svc_page_2$/i.test(rawTrim)) {
+        return getRequestInputMessage(
+          {
+            farm_size_ha: data.farm_size_ha,
+            farm_gps_lat: data.farm_gps_lat,
+            farm_gps_lng: data.farm_gps_lng,
+          },
+          { page: 2 }
+        );
+      }
+      if (/^svc_page_1$/i.test(rawTrim)) {
+        return getRequestInputMessage({
+          farm_size_ha: data.farm_size_ha,
+          farm_gps_lat: data.farm_gps_lat,
+          farm_gps_lng: data.farm_gps_lng,
+        });
+      }
       if (isPrefixedListId(rawBody) && !matchListId(rawBody, 'svc')) {
         return staleListReplyHint();
       }
