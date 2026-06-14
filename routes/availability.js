@@ -35,6 +35,15 @@ router.post('/provider/:providerId', async (req, res) => {
     return res.status(400).json({ error: 'available_date, start_time and end_time are required' });
   }
   try {
+    // Prevent overlapping slots for the same provider on the same date
+    const overlapCheck = await pool.query(
+      `SELECT id FROM provider_availability_slots WHERE provider_id = $1 AND available_date = $2
+       AND NOT (end_time <= $3 OR start_time >= $4) LIMIT 1`,
+      [providerId, available_date, start_time, end_time]
+    );
+    if (overlapCheck.rows.length > 0) {
+      return res.status(409).json({ error: 'Slot overlaps existing availability' });
+    }
     const r = await pool.query(
       `INSERT INTO provider_availability_slots (provider_id, available_date, start_time, end_time)
        VALUES ($1, $2, $3, $4)
@@ -46,6 +55,41 @@ router.post('/provider/:providerId', async (req, res) => {
   } catch (err) {
     console.error('Availability create error:', err);
     res.status(500).json({ error: 'Failed to create availability slot' });
+  }
+});
+
+// Update an availability slot by id
+router.put('/:id', async (req, res) => {
+  const { id } = req.params;
+  const { available_date, start_time, end_time } = req.body || {};
+  if (!available_date || !start_time || !end_time) {
+    return res.status(400).json({ error: 'available_date, start_time and end_time are required' });
+  }
+  try {
+    // Ensure slot exists
+    const existing = await pool.query('SELECT * FROM provider_availability_slots WHERE id = $1', [id]);
+    if (existing.rows.length === 0) return res.status(404).json({ error: 'Slot not found' });
+    const providerId = existing.rows[0].provider_id;
+
+    // Prevent overlaps with other slots (exclude current id)
+    const overlapCheck = await pool.query(
+      `SELECT id FROM provider_availability_slots WHERE provider_id = $1 AND available_date = $2
+       AND id <> $5 AND NOT (end_time <= $3 OR start_time >= $4) LIMIT 1`,
+      [providerId, available_date, start_time, end_time, id]
+    );
+    if (overlapCheck.rows.length > 0) {
+      return res.status(409).json({ error: 'Updated slot would overlap existing availability' });
+    }
+
+    const r = await pool.query(
+      `UPDATE provider_availability_slots SET available_date = $1, start_time = $2, end_time = $3, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $4 RETURNING *`,
+      [available_date, start_time, end_time, id]
+    );
+    res.json(r.rows[0]);
+  } catch (err) {
+    console.error('Availability update error:', err);
+    res.status(500).json({ error: 'Failed to update slot' });
   }
 });
 

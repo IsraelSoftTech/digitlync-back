@@ -121,16 +121,42 @@ async function processPaymentRelease(bookingId, farmerId, verifiedByAdmin = fals
 
     await client.query('COMMIT');
 
-    return {
-      success: true,
-      bookingId,
-      providerAmount,
-      platformFee,
-      payoutMethod: booking.payout_method || 'mobile_money',
-      providerId: booking.provider_id,
-      providerPhone: booking.phone,
-      message: `Payment released: ${providerAmount} FCFA to provider`,
-    };
+    // Queue payout via adapter (best-effort). Adapter implementation logs when no driver configured.
+    try {
+      const payoutAdapter = require('./payout-adapter');
+      // Fire-and-wait a short time to report status to caller
+      const payoutResult = await payoutAdapter.queuePayout({
+        providerId: booking.provider_id,
+        amountFcfa: providerAmount,
+        method: booking.payout_method || 'mobile_money',
+        providerDetails: { phone: booking.phone },
+      });
+
+      return {
+        success: true,
+        bookingId,
+        providerAmount,
+        platformFee,
+        payoutMethod: booking.payout_method || 'mobile_money',
+        providerId: booking.provider_id,
+        providerPhone: booking.phone,
+        payoutResult,
+        message: `Payment released: ${providerAmount} FCFA to provider`,
+      };
+    } catch (err) {
+      console.error('[PaymentProcessor] payout adapter error:', err.message);
+      return {
+        success: true,
+        bookingId,
+        providerAmount,
+        platformFee,
+        payoutMethod: booking.payout_method || 'mobile_money',
+        providerId: booking.provider_id,
+        providerPhone: booking.phone,
+        payoutResult: { success: false, error: err.message },
+        message: `Payment released (queued failed): ${providerAmount} FCFA to provider`,
+      };
+    }
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('[PaymentProcessor] Error releasing payment:', err.message);

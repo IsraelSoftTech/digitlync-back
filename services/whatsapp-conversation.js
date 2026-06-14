@@ -7,10 +7,8 @@ const { pool } = require('../config/db');
 const { sendBrandedText } = require('./whatsapp-sender');
 const {
   buildOptionListReply,
-  buildServiceListReply,
+  buildServiceRows,
   normalizeUserChoice,
-  matchListId,
-  isPrefixedListId,
   sendBotReply,
 } = require('./whatsapp-interactive');
 const { haversineDistanceKm } = require('../utils/geo');
@@ -111,11 +109,7 @@ async function insertFarmerFullFromPending(waPhone, pending) {
   const totalHa = farms.reduce((s, f) => s + (parseFloat(f.plot_size_ha) || 0), 0);
   const allCrops = farms.map((f) => (f.crop_type || '').trim()).filter(Boolean).join('; ') || 'Not specified';
   const serviceSet = new Set();
-  farms.forEach((f) => {
-    (f.service_labels || []).forEach((x) => {
-      serviceSet.add(x === 'Other' && f.other_services ? f.other_services : x);
-    });
-  });
+  farms.forEach((f) => (f.service_labels || []).forEach((x) => serviceSet.add(x)));
   const serviceNeeds = Array.from(serviceSet);
   const otherBits = farms.map((f) => f.other_services).filter(Boolean);
   const notesParts = ['Registered via DigiLync WhatsApp (structured flow).'];
@@ -446,33 +440,11 @@ function parseFarmerBasicForm(text) {
   return { fullName, region, division, subdivision, district };
 }
 
-function parseCropOrLivestock(kv) {
-  return (
-    kv.crop ||
-    kv.crops ||
-    kv.crop_type ||
-    kv['crop(s)'] ||
-    kv['crop(s)_or_livestock'] ||
-    kv.livestock ||
-    kv.animals ||
-    kv.animal ||
-    kv['animal(s)'] ||
-    ''
-  ).trim();
-}
-
-function formatFarmServiceLabels(farm) {
-  const parts = (farm.service_labels || []).map((label) =>
-    label === 'Other' && farm.other_services ? farm.other_services : label
-  );
-  return parts.filter(Boolean).join(', ') || '—';
-}
-
 function getFarmerFarmDetailsMessage() {
   return (
     'Now enter your farm details:\n\n' +
     'Farm size (hectares):\n' +
-    'Crop(s) or Livestock:\n\n' +
+    'Crop(s):\n\n' +
     'Select services needed (reply with numbers separated by comma):\n\n' +
     '1. Ploughing\n' +
     '2. Planting\n' +
@@ -489,16 +461,10 @@ function getFarmerFarmDetailsMessage() {
     '13. Milking\n' +
     '14. Livestock Transport\n' +
     '15. Animal Health\n\n' +
-    '*Examples:*\n' +
-    '_Crops:_\n' +
+    '*Example:*\n' +
     'Farm size: 2.5\n' +
     'Crop: Maize; Cassava\n' +
-    'Services: 1,3,5\n\n' +
-    '_Livestock:_\n' +
-    'Farm size: 5\n' +
-    'Livestock: Cattle; Goats\n' +
-    'Services: 10,11\n\n' +
-    '_Other (option 9):_ include *9* in Services — we will ask you to describe it next.'
+    'Services: 1,3,5 or 10,11 for livestock services'
   );
 }
 
@@ -535,8 +501,9 @@ function buildFarmerConfirmationMessage(pending) {
   lines.push(`Location: ${district}`);
   const farms = pending.farms || [];
   farms.forEach((f, i) => {
+    const svc = (f.service_labels || []).join(', ') || '—';
     lines.push(
-      `Farm ${i + 1}: ${f.plot_size_ha} ha — ${(f.crop_type || '—').trim()} — ${formatFarmServiceLabels(f)}`
+      `Farm ${i + 1}: ${f.plot_size_ha} ha — ${(f.crop_type || '—').trim()} — ${svc}`
     );
   });
   return buildOptionListReply(lines.join('\n'), [
@@ -548,7 +515,7 @@ function buildFarmerConfirmationMessage(pending) {
 function parseFarmDetailsBatch(text) {
   const kv = parseKeyValueBlock(text);
   const farmSize = parseFloat(kv.farm_size || kv['farm_size_(hectares)'] || '');
-  const crop = parseCropOrLivestock(kv);
+  const crop = (kv.crop || kv.crops || kv.crop_type || kv['crop(s)'] || '').trim();
   const serviceNums = (kv.services || '')
     .replace(/[^\d,]/g, '')
     .split(',')
@@ -697,206 +664,13 @@ function getRequestSelectFarmMessage(farms) {
   return buildOptionListReply('Select the farm for this service request.', rows);
 }
 
-function staleListReplyHint() {
-  return 'That option is from an earlier message and no longer applies. Reply *MENU* for the main menu.';
-}
-
-/**
- * Handle recap list taps (recap_1 … recap_3) — always wins over in-flow state.
- */
-async function dispatchRecapChoice(waFrom, choice, existing, session) {
-  if (!existing || existing.type !== 'farmer') {
-    return 'That option is available after you register as a farmer. Reply *MENU*.';
-  }
-  const farms = await getFarmerFarms(existing.id);
-  const inFlow =
-    session.step &&
-    session.step !== 'recap_options' &&
-    session.step !== 'main_menu';
-  if (inFlow || session.step !== 'recap_options') {
-    await updateSession(waFrom, { step: 'recap_options', data: { farmer_id: existing.id, farms } });
-  }
-  const freshSession = await getSession(waFrom);
-  const freshData = parseSessionData(freshSession.data);
-  return handleRecapOptionsFlow(waFrom, existing, choice, freshData);
-}
-
-/**
- * Route prefixed list replies to the correct step handler.
- * Prevents ID collisions (e.g. opt_1 vs service 1, recap_3 vs main_3).
- */
-async function dispatchPrefixedListReply(waFrom, rawBody, session, data, existing, latitude, longitude) {
-  const recapChoice = matchListId(rawBody, 'recap');
-  if (recapChoice) {
-    return dispatchRecapChoice(waFrom, recapChoice, existing, session);
-  }
-
-  const privacyChoice = matchListId(rawBody, 'privacy');
-  if (privacyChoice) {
-    if (session.step === 'privacy_consent_new') {
-      return handlePrivacyConsentPostRegister(waFrom, privacyChoice, data);
-    }
-    return staleListReplyHint();
-  }
-
-  const optChoice = matchListId(rawBody, 'opt');
-  if (optChoice) {
-    if (session.step === 'unsubscribe_confirm' && existing) {
-      return handleUnsubscribeConfirm(waFrom, existing, optChoice);
-    }
-    if (session.step === 'farmer_multi_prompt') {
-      return handleFarmerFlow(waFrom, session, data, optChoice, latitude, longitude);
-    }
-    return staleListReplyHint();
-  }
-
-  const confirmChoice = matchListId(rawBody, 'confirm');
-  if (confirmChoice) {
-    if (session.step === 'farmer_confirm_registration') {
-      return handleFarmerFlow(waFrom, session, data, confirmChoice, latitude, longitude);
-    }
-    if (session.step === 'request_confirm') {
-      return handleRequestFlow(waFrom, session, data, confirmChoice, latitude, longitude, existing, rawBody);
-    }
-    return staleListReplyHint();
-  }
-
-  const provChoice = matchListId(rawBody, 'prov');
-  if (provChoice) {
-    if (session.step === 'request_choose_provider') {
-      return handleRequestFlow(waFrom, session, data, provChoice, latitude, longitude, existing, rawBody);
-    }
-    return staleListReplyHint();
-  }
-
-  const farmChoice = matchListId(rawBody, 'farm');
-  if (farmChoice) {
-    if (session.step === 'request_select_farm') {
-      return handleRequestFlow(waFrom, session, data, farmChoice, latitude, longitude, existing, rawBody);
-    }
-    if (session.step === 'edit_farm_select' && existing?.type === 'farmer') {
-      return handleEditFarmSelect(waFrom, existing, farmChoice, data, rawBody);
-    }
-    return staleListReplyHint();
-  }
-
-  const svcChoice = matchListId(rawBody, 'svc');
-  if (svcChoice) {
-    if (session.step === 'request_input') {
-      return handleRequestFlow(waFrom, session, data, svcChoice, latitude, longitude, existing, rawBody);
-    }
-    return staleListReplyHint();
-  }
-
-  return null;
-}
-
-/**
- * Handle explicit main-menu list taps (main_1 … main_7).
- * Always wins over in-flow state so stale menu messages in chat cannot mis-route.
- */
-async function dispatchMainMenuChoice(waFrom, choice, existing, session) {
-  const text = String(choice || '').trim();
-  const inFlow =
-    session.step &&
-    session.step !== 'main_menu' &&
-    (session.step.startsWith('farmer_') ||
-      session.step.startsWith('provider_') ||
-      session.step.startsWith('request_') ||
-      session.step === 'privacy_consent_new' ||
-      session.step === 'unsubscribe_confirm' ||
-      session.step === 'recap_options' ||
-      session.step === 'add_farm_details' ||
-      session.step === 'edit_farm_select' ||
-      session.step === 'edit_farm_input');
-  if (inFlow) {
-    await updateSession(waFrom, { step: 'main_menu', data: {} });
-  }
-
-  if (existing) {
-    if (text === '4') return handleMyRequests(waFrom, existing);
-    if (text === '5') return getHelpMessage();
-    if (text === '6') return handleUnsubscribeFlow(waFrom, existing);
-    if (text === '7') return handleRecap(waFrom, existing, true);
-    if (text === '1' && existing.type === 'provider') {
-      return (
-        'You are already registered as a *service provider*. To register as a farmer, use a different WhatsApp number or contact support.\n\n' +
-        'Reply *MENU* for options.'
-      );
-    }
-    if (text === '2' && existing.type === 'farmer') {
-      return (
-        'You are already registered as a *farmer*. To sign up as a service provider, use a different WhatsApp number or contact support.\n\n' +
-        'Reply *MENU* for options.'
-      );
-    }
-    if (existing.type === 'farmer' && text === '3') {
-      const farms = await getFarmerFarms(existing.id);
-      if (farms.length === 0) {
-        return 'No farm registered yet. Please complete your registration first. Reply *MENU* for options.';
-      }
-      if (farms.length > 1) {
-        await updateSession(waFrom, { step: 'request_select_farm', data: { farmer_id: existing.id, farms } });
-        return getRequestSelectFarmMessage(farms);
-      }
-      const farm = farms[0];
-      await updateSession(waFrom, {
-        step: 'request_input',
-        data: {
-          farmer_id: existing.id,
-          farm_plot_id: farm?.id,
-          farm_size_ha: farm?.plot_size_ha ?? farm?.farm_size_ha,
-          farm_gps_lat: farm?.gps_lat,
-          farm_gps_lng: farm?.gps_lng,
-        },
-      });
-      return getRequestInputMessage({
-        farm_size_ha: farm?.plot_size_ha ?? farm?.farm_size_ha,
-        farm_gps_lat: farm?.gps_lat,
-        farm_gps_lng: farm?.gps_lng,
-      });
-    }
-    if (existing.type === 'provider' && text === '3') {
-      return 'Please register as a farmer to request services. Reply *MENU* for options.';
-    }
-    if (text === '1' && existing.type === 'farmer') {
-      return 'You are already registered as a farmer. Reply *3* to request a service or *MENU* for options.';
-    }
-    if (text === '2' && existing.type === 'provider') {
-      return 'You are already registered as a provider. Reply *4* for your jobs or *MENU* for options.';
-    }
-    return getMainMenu(existing);
-  }
-
-  if (text === '1') {
-    await updateSession(waFrom, { user_type: 'farmer', step: 'farmer_basic', data: {} });
-    return getFarmerBasicMessage();
-  }
-  if (text === '2') {
-    await updateSession(waFrom, { user_type: 'provider', step: 'provider_batched', data: {} });
-    return getProviderBatchedMessage();
-  }
-  if (text === '3') {
-    return 'Please register as a farmer first (reply *1*). Reply *MENU* for options.';
-  }
-  if (text === '4') {
-    return 'Please register first. Reply *1* for Farmer or *2* for Provider.';
-  }
-  if (text === '6' || text === '7') {
-    return 'That option is available after you register. Reply *1* (Farmer) or *2* (Provider), or *MENU*.';
-  }
-  if (text === '5') return getHelpMessage();
-  return getMainMenu();
-}
-
 async function handleIncoming(waFrom, body, latitude, longitude, profileName) {
-  const rawBody = (body || '').trim();
   const phone = normalizePhone(waFrom);
-  const text = normalizeUserChoice(rawBody);
+  const text = normalizeUserChoice((body || '').trim());
   const textLower = text.toLowerCase();
   const existing = await findExistingUser(phone);
   const session = await getSession(waFrom);
-  const data = parseSessionData(session.data);
+  const data = typeof session.data === 'object' ? session.data : (session.data ? JSON.parse(session.data) : {});
 
   const inActiveFlow =
     (session.step &&
@@ -932,24 +706,6 @@ async function handleIncoming(waFrom, body, latitude, longitude, profileName) {
     return getMainMenu(ex);
   }
 
-  const mainMenuMatch = rawBody.match(/^main_(\d+)$/i);
-  if (mainMenuMatch) {
-    return dispatchMainMenuChoice(waFrom, mainMenuMatch[1], existing, session);
-  }
-
-  if (isPrefixedListId(rawBody)) {
-    const prefixedReply = await dispatchPrefixedListReply(
-      waFrom,
-      rawBody,
-      session,
-      data,
-      existing,
-      latitude,
-      longitude
-    );
-    if (prefixedReply != null) return prefixedReply;
-  }
-
   if (session.step === 'privacy_consent_new') {
     return handlePrivacyConsentPostRegister(waFrom, text, data);
   }
@@ -967,7 +723,7 @@ async function handleIncoming(waFrom, body, latitude, longitude, profileName) {
   }
 
   if (session.step === 'edit_farm_select' && existing && existing.type === 'farmer') {
-    return handleEditFarmSelect(waFrom, existing, text, data, rawBody);
+    return handleEditFarmSelect(waFrom, existing, text, data);
   }
 
   if (session.step === 'edit_farm_input' && existing && existing.type === 'farmer') {
@@ -1020,9 +776,59 @@ async function handleIncoming(waFrom, body, latitude, longitude, profileName) {
     }
   }
 
-  // Registered user: typed main-menu shortcuts (1–7) when not in an active flow
-  if (existing && !inActiveFlow && /^[1-7]$/.test(text)) {
-    return dispatchMainMenuChoice(waFrom, text, existing, session);
+  // Registered user: main-menu shortcuts only (do not steal 3–7 during request / provider-pick flows)
+  if (existing && !inActiveFlow) {
+    if (text === '4') return handleMyRequests(waFrom, existing);
+    if (text === '5') return getHelpMessage();
+    if (text === '6') return handleUnsubscribeFlow(waFrom, existing);
+    if (text === '7') return handleRecap(waFrom, existing, true);
+    if (text === '1' && existing.type === 'provider') {
+      return (
+        'You are already registered as a *service provider*. To register as a farmer, use a different WhatsApp number or contact support.\n\n' +
+        'Reply *MENU* for options.'
+      );
+    }
+    if (text === '2' && existing.type === 'farmer') {
+      return (
+        'You are already registered as a *farmer*. To sign up as a service provider, use a different WhatsApp number or contact support.\n\n' +
+        'Reply *MENU* for options.'
+      );
+    }
+    if (existing.type === 'farmer' && text === '3') {
+      const farms = await getFarmerFarms(existing.id);
+      if (farms.length === 0) {
+        return 'No farm registered yet. Please complete your registration first. Reply *MENU* for options.';
+      }
+      if (farms.length > 1) {
+        await updateSession(waFrom, { step: 'request_select_farm', data: { farmer_id: existing.id, farms } });
+        return getRequestSelectFarmMessage(farms);
+      }
+      const farm = farms[0];
+      await updateSession(waFrom, {
+        step: 'request_input',
+        data: {
+          farmer_id: existing.id,
+          farm_plot_id: farm?.id,
+          farm_size_ha: farm?.plot_size_ha ?? farm?.farm_size_ha,
+          farm_gps_lat: farm?.gps_lat,
+          farm_gps_lng: farm?.gps_lng,
+        },
+      });
+      return getRequestInputMessage({
+        farm_size_ha: farm?.plot_size_ha ?? farm?.farm_size_ha,
+        farm_gps_lat: farm?.gps_lat,
+        farm_gps_lng: farm?.gps_lng,
+      });
+    }
+    if (existing.type === 'provider' && text === '3') {
+      return 'Please register as a farmer to request services. Reply *MENU* for options.';
+    }
+    if (text === '1' && existing.type === 'farmer') {
+      return 'You are already registered as a farmer. Reply *3* to request a service or *MENU* for options.';
+    }
+    if (text === '2' && existing.type === 'provider') {
+      return 'You are already registered as a provider. Reply *4* for your jobs or *MENU* for options.';
+    }
   }
 
   // Unregistered: main-menu shortcuts only (do not steal "1"/"2" while mid-registration)
@@ -1032,8 +838,24 @@ async function handleIncoming(waFrom, body, latitude, longitude, profileName) {
       (session.step.startsWith('farmer_') ||
         session.step.startsWith('provider_') ||
         session.step.startsWith('request_'));
-    if (!inOnboarding && /^[1-7]$/.test(text)) {
-      return dispatchMainMenuChoice(waFrom, text, existing, session);
+    if (!inOnboarding) {
+      if (text === '1') {
+        await updateSession(waFrom, { user_type: 'farmer', step: 'farmer_basic', data: {} });
+        return getFarmerBasicMessage();
+      }
+      if (text === '2') {
+        await updateSession(waFrom, { user_type: 'provider', step: 'provider_batched', data: {} });
+        return getProviderBatchedMessage();
+      }
+      if (text === '3') {
+        return 'Please register as a farmer first (reply *1*). Reply *MENU* for options.';
+      }
+      if (text === '4') {
+        return 'Please register first. Reply *1* for Farmer or *2* for Provider.';
+      }
+      if (text === '6' || text === '7') {
+        return 'That option is available after you register. Reply *1* (Farmer) or *2* (Provider), or *MENU*.';
+      }
     }
   }
 
@@ -1045,7 +867,7 @@ async function handleIncoming(waFrom, body, latitude, longitude, profileName) {
     return handleProviderFlow(waFrom, session, data, text, latitude, longitude);
   }
   if (session.step && session.step.startsWith('request_')) {
-    return handleRequestFlow(waFrom, session, data, text, latitude, longitude, existing, rawBody);
+    return handleRequestFlow(waFrom, session, data, text, latitude, longitude, existing);
   }
 
   // Provider accept/reject
@@ -1266,10 +1088,7 @@ async function handleFarmerFlow(waFrom, session, data, text, latitude, longitude
       }
       const b = parseFarmDetailsBatch(text);
       if (Number.isNaN(b.farmSize) || b.farmSize < 0 || !b.crop || b.serviceNums.length === 0) {
-        return (
-          'Please send farm size (number), crop(s) or livestock, and services (numbers).\n\n' +
-          getFarmerFarmDetailsMessage()
-        );
+        return 'Please send farm size (number), crop(s), and services (numbers).\n\n' + getFarmerFarmDetailsMessage();
       }
       const draftFarm = {
         gps_lat: draft.gps_lat,
@@ -1367,19 +1186,13 @@ function getProviderBatchedMessage() {
     '6. Processing\n' +
     '7. Storage\n' +
     '8. Transport\n' +
-    '9. Other (specify)\n' +
-    '10. Vaccination\n' +
-    '11. Deworming\n' +
-    '12. Feeding\n' +
-    '13. Milking\n' +
-    '14. Livestock Transport\n' +
-    '15. Animal Health\n\n' +
+    '9. Other\n\n' +
     '*Example:*\n' +
     'Name: John\n' +
     'Radius: 10\n' +
     'Price: 12000\n' +
     'Capacity: 3\n' +
-    'Services: 1,5 or 10,11\n\n' +
+    'Services: 1,5\n\n' +
     'After you send this, you will get a *link* to set your base location on the map.'
   );
 }
@@ -1404,7 +1217,7 @@ function hasUsableFarmGps(lat, lng) {
   return true;
 }
 
-function getRequestInputMessage(data = {}, opts = {}) {
+function getRequestInputMessage(data = {}) {
   const hasPresetFarm = data.farm_size_ha != null;
   const useSavedPin = hasUsableFarmGps(data.farm_gps_lat, data.farm_gps_lng);
   const followUp = useSavedPin
@@ -1420,14 +1233,9 @@ function getRequestInputMessage(data = {}, opts = {}) {
     description += '\n\nAfter selecting, reply with:\n*Farm size:* <hectares>';
   }
   description += `\n\n${followUp}`;
-  description +=
-    '\n\n_Tap a service below, or reply with numbers (e.g. 1,3 or 10,11). Option 9 = Other — describe when prompted._';
-  if (opts.page === 2) {
-    description += '\n\n_Showing services 10–15. Tap *Earlier services* for options 1–9._';
-  }
-  return buildServiceListReply(description, { page: opts.page });
+  return buildOptionListReply(description, buildServiceRows());
 }
-async function handleRequestFlow(waFrom, session, data, text, latitude, longitude, existing, rawBody = '') {
+async function handleRequestFlow(waFrom, session, data, text, latitude, longitude, existing) {
   if (!existing || existing.type !== 'farmer') {
     await updateSession(waFrom, { step: 'main_menu', data: {} });
     return getMainMenu();
@@ -1437,8 +1245,7 @@ async function handleRequestFlow(waFrom, session, data, text, latitude, longitud
 
   switch (session.step) {
     case 'request_select_farm': {
-      const farmListMatch = String(rawBody || '').trim().match(/^farm_(\d+)$/i);
-      const num = farmListMatch ? parseInt(farmListMatch[1], 10) : parseInt(text.trim(), 10);
+      const num = parseInt(text.trim(), 10);
       const farms = data.farms || [];
       if (isNaN(num) || num < 1 || num > farms.length) {
         return `Reply with a number from 1 to ${farms.length}.\n\n` + getRequestSelectFarmMessage(farms);
@@ -1463,39 +1270,11 @@ async function handleRequestFlow(waFrom, session, data, text, latitude, longitud
     }
 
     case 'request_input': {
-      const rawTrim = String(rawBody || '').trim();
-      if (/^svc_page_2$/i.test(rawTrim)) {
-        return getRequestInputMessage(
-          {
-            farm_size_ha: data.farm_size_ha,
-            farm_gps_lat: data.farm_gps_lat,
-            farm_gps_lng: data.farm_gps_lng,
-          },
-          { page: 2 }
-        );
-      }
-      if (/^svc_page_1$/i.test(rawTrim)) {
-        return getRequestInputMessage({
-          farm_size_ha: data.farm_size_ha,
-          farm_gps_lat: data.farm_gps_lat,
-          farm_gps_lng: data.farm_gps_lng,
-        });
-      }
-      if (isPrefixedListId(rawBody) && !matchListId(rawBody, 'svc')) {
-        return staleListReplyHint();
-      }
       const kv = parseKeyValueBlock(text);
-      let nums = [];
-      const svcListMatch = String(rawBody || '').trim().match(/^svc_(\d+)$/i);
-      if (svcListMatch) {
-        const n = parseInt(svcListMatch[1], 10);
-        if (!Number.isNaN(n) && n >= 1 && n <= SERVICE_LIST.length) nums = [n];
-      } else {
-        // Accept comma-separated service numbers (e.g. "1,3,10") or a single number typed by user
-        const rawServices = (kv.service || kv.services || text || '').trim();
-        nums = Array.from(new Set((rawServices.match(/\d+/g) || []).map((n) => parseInt(n, 10))))
-          .filter((n) => !Number.isNaN(n) && n >= 1 && n <= SERVICE_LIST.length);
-      }
+      // Accept comma-separated service numbers (e.g. "1,3,10") or a single number
+      const rawServices = (kv.service || kv.services || text || '').trim();
+      const nums = Array.from(new Set((rawServices.match(/\d+/g) || []).map((n) => parseInt(n, 10))))
+        .filter((n) => !Number.isNaN(n) && n >= 1 && n <= SERVICE_LIST.length);
       const farmSizeRaw = parseFloat(kv.farm_size || '');
       const farmSize = !isNaN(farmSizeRaw) && farmSizeRaw >= 0 ? farmSizeRaw : (data.farm_size_ha != null ? parseFloat(data.farm_size_ha) : NaN);
       if (!nums.length) {
@@ -1505,14 +1284,8 @@ async function handleRequestFlow(waFrom, session, data, text, latitude, longitud
           farm_gps_lng: data.farm_gps_lng,
         });
       }
-      if (nums.includes(9)) {
-        await updateSession(waFrom, {
-          step: 'request_other_spec',
-          data: { ...data, pending_service_nums: nums, pending_farm_size: farmSize },
-        });
-        return getFarmerOtherServicesMessage();
-      }
       if (isNaN(farmSize) || farmSize < 0) {
+        const sample = SERVICE_LIST[nums[0] - 1] || 'service';
         return (
           `You selected *${nums.map((n) => SERVICE_LIST[n - 1]).join(', ')}*.\n\n` +
           `Please reply with your farm size in hectares.\n\n*Example:*\nFarm size: 2.5`
@@ -1529,88 +1302,6 @@ async function handleRequestFlow(waFrom, session, data, text, latitude, longitud
       await updateSession(waFrom, {
         step: 'request_schedule_budget',
         data: { ...data, request_pending: requestPending },
-      });
-      return (
-        `You selected *${selectedServices.join(', ')}*.\n\n` +
-        'Reply with:\n' +
-        'Date: YYYY-MM-DD\n' +
-        'Time: HH:MM\n' +
-        'Budget Min: amount\n' +
-        'Budget Max: amount'
-      );
-    }
-
-    case 'request_other_spec': {
-      const more = text.trim();
-      if (!more) return getFarmerOtherServicesMessage();
-      const nums = data.pending_service_nums || [];
-      const farmSize =
-        data.pending_farm_size != null && !Number.isNaN(data.pending_farm_size)
-          ? data.pending_farm_size
-          : data.farm_size_ha != null
-            ? parseFloat(data.farm_size_ha)
-            : NaN;
-      if (Number.isNaN(farmSize) || farmSize < 0) {
-        await updateSession(waFrom, {
-          step: 'request_farm_size_after_other',
-          data: { ...data, other_service_detail: more },
-        });
-        return (
-          `Other service noted: *${more}*\n\n` +
-          `Please reply with your farm size in hectares.\n\n*Example:*\nFarm size: 2.5`
-        );
-      }
-      const selectedServices = nums.map((n) => (n === 9 ? more : SERVICE_LIST[n - 1]));
-      const requestPending = {
-        farmer_id: existing.id,
-        farm_plot_id: data.farm_plot_id ?? null,
-        service_type: selectedServices[0],
-        service_types: selectedServices,
-        farm_size_ha: farmSize,
-        other_service_detail: more,
-      };
-      await updateSession(waFrom, {
-        step: 'request_schedule_budget',
-        data: { ...data, request_pending: requestPending, pending_service_nums: undefined, pending_farm_size: undefined },
-      });
-      return (
-        `You selected *${selectedServices.join(', ')}*.\n\n` +
-        'Reply with:\n' +
-        'Date: YYYY-MM-DD\n' +
-        'Time: HH:MM\n' +
-        'Budget Min: amount\n' +
-        'Budget Max: amount'
-      );
-    }
-
-    case 'request_farm_size_after_other': {
-      const kv = parseKeyValueBlock(text);
-      const farmSize = parseFloat(kv.farm_size || text.trim() || '');
-      if (Number.isNaN(farmSize) || farmSize < 0) {
-        return (
-          `Please reply with your farm size in hectares.\n\n*Example:*\nFarm size: 2.5`
-        );
-      }
-      const nums = data.pending_service_nums || [];
-      const more = data.other_service_detail || 'Other';
-      const selectedServices = nums.map((n) => (n === 9 ? more : SERVICE_LIST[n - 1]));
-      const requestPending = {
-        farmer_id: existing.id,
-        farm_plot_id: data.farm_plot_id ?? null,
-        service_type: selectedServices[0],
-        service_types: selectedServices,
-        farm_size_ha: farmSize,
-        other_service_detail: more,
-      };
-      await updateSession(waFrom, {
-        step: 'request_schedule_budget',
-        data: {
-          ...data,
-          request_pending: requestPending,
-          pending_service_nums: undefined,
-          pending_farm_size: undefined,
-          other_service_detail: undefined,
-        },
       });
       return (
         `You selected *${selectedServices.join(', ')}*.\n\n` +
@@ -1702,8 +1393,7 @@ async function handleRequestFlow(waFrom, session, data, text, latitude, longitud
     }
 
     case 'request_choose_provider': {
-      const provListMatch = String(rawBody || '').trim().match(/^prov_(\d+)$/i);
-      const num = provListMatch ? parseInt(provListMatch[1], 10) : parseInt(text.trim(), 10);
+      const num = parseInt(text.trim(), 10);
       const providers = data.matched_providers || [];
       if (isNaN(num) || num < 1 || num > providers.length) {
         return buildProviderChoiceListReply(providers, data.farm_size_ha || 0);
@@ -1758,7 +1448,7 @@ async function handleProviderFlow(waFrom, session, data, text, latitude, longitu
     if (isNaN(radius) || radius < 0) return 'Please include *Radius:* (km). Example: Radius: 10\n\n' + getProviderBatchedMessage();
     if (isNaN(price) || price < 0) return 'Please include *Price:* (FCFA/ha). Example: Price: 12000\n\n' + getProviderBatchedMessage();
     if (isNaN(capacity) || capacity < 0) return 'Please include *Capacity:* (ha/day). Example: Capacity: 3\n\n' + getProviderBatchedMessage();
-    const serviceNums = (kv.services || '').replace(/[^\d,]/g, '').split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => !isNaN(n) && n >= 1 && n <= SERVICE_LIST.length);
+    const serviceNums = (kv.services || '').replace(/[^\d,]/g, '').split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => !isNaN(n) && n >= 1 && n <= 9);
     const services = serviceNums.map((n) => SERVICE_LIST[n - 1]).filter(Boolean);
     const token = crypto.randomUUID();
     const gpsUrl = `${getFrontendBaseUrl()}/gps?t=${encodeURIComponent(token)}&role=provider`;
@@ -1864,12 +1554,10 @@ function getAddFarmDetailsMessage() {
     'Add another farm:\n\n' +
     'Enter in this format:\n\n' +
     'Farm size (hectares):\n' +
-    'Crop(s) or Livestock:\n\n' +
-    '*Examples:*\n' +
+    'Crop(s):\n\n' +
+    '*Example:*\n' +
     'Farm size: 2.5\n' +
-    'Crop: Maize, Cassava\n\n' +
-    'Farm size: 5\n' +
-    'Livestock: Cattle; Goats'
+    'Crop: Maize, Cassava'
   );
 }
 
@@ -1881,7 +1569,7 @@ async function handleAddAnotherFarm(waFrom, existing) {
 async function handleAddFarmDetails(waFrom, existing, text, data) {
   const kv = parseKeyValueBlock(text);
   const farmSize = parseFloat(kv.farm_size || kv.farm_size_hectares || '');
-  const crop = parseCropOrLivestock(kv);
+  const crop = kv.crop || kv.crops || kv.crop_type || '';
   if (isNaN(farmSize) || farmSize < 0) return 'Please include *Farm size:* (number). Example: Farm size: 2.5\n\n' + getAddFarmDetailsMessage();
   try {
     const farmerRes = await pool.query('SELECT gps_lat, gps_lng FROM farmers WHERE id = $1', [existing.id]);
@@ -1967,10 +1655,9 @@ async function handleRecapOptionsFlow(waFrom, existing, text, data) {
   return handleRecap(waFrom, existing, false);
 }
 
-async function handleEditFarmSelect(waFrom, existing, text, data, rawBody = '') {
+async function handleEditFarmSelect(waFrom, existing, text, data) {
   const farms = data.farms || [];
-  const farmListMatch = String(rawBody || '').trim().match(/^farm_(\d+)$/i);
-  const num = farmListMatch ? parseInt(farmListMatch[1], 10) : parseInt(text.trim(), 10);
+  const num = parseInt(text.trim(), 10);
   if (isNaN(num) || num < 1 || num > farms.length) {
     return `Reply with a number from 1 to ${farms.length}.\n\n` + getEditFarmSelectMessage(farms);
   }
@@ -1991,27 +1678,23 @@ async function handleEditFarmSelect(waFrom, existing, text, data, rawBody = '') 
     `Update *Farm ${num}* (current: ${size} ha — ${crop})\n\n` +
     'Send in this format:\n\n' +
     'Farm size (hectares):\n' +
-    'Crop(s) or Livestock:\n\n' +
-    '*Examples:*\n' +
+    'Crop(s):\n\n' +
+    '*Example:*\n' +
     'Farm size: 3\n' +
-    'Crop: Maize\n\n' +
-    'Farm size: 5\n' +
-    'Livestock: Cattle'
+    'Crop: Maize'
   );
 }
 
 async function handleEditFarmInput(waFrom, existing, text, data) {
   const kv = parseKeyValueBlock(text);
   const farmSize = parseFloat(kv.farm_size || kv.farm_size_hectares || '');
-  const crop = parseCropOrLivestock(kv);
+  const crop = (kv.crop || kv.crops || kv.crop_type || '').trim();
   if (isNaN(farmSize) || farmSize < 0 || !crop) {
     return (
-      'Please send *Farm size:* and *Crop:* or *Livestock:* (both required).\n\n' +
-      '*Examples:*\n' +
+      'Please send *Farm size:* and *Crop:* (both required).\n\n' +
+      '*Example:*\n' +
       'Farm size: 3\n' +
-      'Crop: Maize\n\n' +
-      'Farm size: 5\n' +
-      'Livestock: Cattle'
+      'Crop: Maize'
     );
   }
   try {
