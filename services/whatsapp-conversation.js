@@ -1927,6 +1927,8 @@ async function handleProviderRejectJob(waFrom, existing, bookingId) {
   }
 }
 
+}
+
 module.exports = {
   handleIncoming,
   normalizePhone,
