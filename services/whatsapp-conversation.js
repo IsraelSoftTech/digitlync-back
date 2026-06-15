@@ -5,6 +5,7 @@
 const crypto = require('crypto');
 const { pool } = require('../config/db');
 const { sendBrandedText } = require('./whatsapp-sender');
+const paymentProcessor = require('./payment-processor');
 const {
   buildOptionListReply,
   buildServiceRows,
@@ -716,6 +717,10 @@ async function handleIncoming(waFrom, body, latitude, longitude, profileName) {
 
   if (session.step === 'recap_options' && existing && existing.type === 'farmer') {
     return handleRecapOptionsFlow(waFrom, existing, text, data);
+  }
+
+  if (session.step === 'farmer_confirmations' && existing && existing.type === 'farmer') {
+    return handleFarmerConfirmationsFlow(waFrom, existing, text, data);
   }
 
   if (session.step === 'add_farm_details' && existing && existing.type === 'farmer') {
@@ -1758,23 +1763,30 @@ async function handleUnsubscribeConfirm(waFrom, existing, text) {
 async function handleMyRequests(waFrom, existing) {
   if (existing.type === 'farmer') {
     const r = await pool.query(
-      `SELECT b.id, b.service_type, b.farm_size_ha, b.status, b.scheduled_date, p.full_name AS provider_name
+      `SELECT b.id, b.service_type, b.farm_size_ha, b.status, b.scheduled_date, p.full_name AS provider_name, p.phone AS provider_phone
        FROM bookings b
        LEFT JOIN providers p ON b.provider_id = p.id
        WHERE b.farmer_id = $1
        ORDER BY b.created_at DESC
-       LIMIT 10`,
+       LIMIT 20`,
       [existing.id]
     );
     if (r.rows.length === 0) return 'You have no requests yet. Reply *3* to request a service.';
-    let msg = '📋 *Your Requests:*\n\n';
-    r.rows.forEach((b, i) => {
-      msg += `${i + 1}. ${b.service_type} – ${b.farm_size_ha} ha [${b.status}]\n`;
-      if (b.provider_name) msg += `   Provider: ${b.provider_name}\n`;
-      msg += '\n';
+
+    // Build interactive list where confirmed bookings can be "confirmed complete" by farmer
+    const rows = r.rows.map((b) => {
+      const descParts = [`${b.farm_size_ha} ha`, `[${b.status}]`];
+      if (b.provider_name) descParts.push(String(b.provider_name).slice(0, 32));
+      const available = b.status === 'confirmed' && b.provider_name ? true : false;
+      return {
+        id: `confirm_${b.id}`,
+        title: `${b.service_type} — ${b.scheduled_date || 'TBD'}`,
+        description: `${descParts.join(' · ').slice(0, 72)}` + (available ? ' · Tap to Confirm completion' : ''),
+      };
     });
-    return msg + 'Reply *MENU* for options.';
-  }
+
+    await updateSession(waFrom, { step: 'farmer_confirmations', data: { farmer_id: existing.id } });
+    return buildOptionListReply('📋 Your requests — tap a booking to confirm completion (provider will be paid after confirmation).', rows);
   if (existing.type === 'provider') {
     const jobs = await pool.query(
       `SELECT b.id, b.service_type, b.farm_size_ha, b.status, f.full_name AS farmer_name
@@ -1794,6 +1806,70 @@ async function handleMyRequests(waFrom, existing) {
     return msg;
   }
   return getMainMenu();
+}
+
+async function handleFarmerConfirmationsFlow(waFrom, existing, text, data) {
+  const t = String(text || '').trim();
+  // Expect interactive id like 'confirm_<bookingId>'
+  const m = t.match(/^confirm_(\d+)$/i);
+  if (!m) {
+    // Show help / reset to main menu
+    await updateSession(waFrom, { step: 'main_menu', data: {} });
+    return 'Reply *MENU* for options or *4* to view requests again.';
+  }
+  const bookingId = parseInt(m[1], 10);
+  if (Number.isNaN(bookingId)) {
+    await updateSession(waFrom, { step: 'main_menu', data: {} });
+    return 'Invalid selection. Reply *MENU* for options.';
+  }
+
+  // Verify booking belongs to farmer and is in a state that can be confirmed
+  try {
+    const br = await pool.query(
+      `SELECT b.id, b.status, b.farmer_id, b.provider_id, p.phone AS provider_phone, p.full_name AS provider_name
+       FROM bookings b
+       LEFT JOIN providers p ON b.provider_id = p.id
+       WHERE b.id = $1`,
+      [bookingId]
+    );
+    if (br.rows.length === 0) {
+      await updateSession(waFrom, { step: 'main_menu', data: {} });
+      return 'Booking not found. Reply *MENU* for options.';
+    }
+    const b = br.rows[0];
+    if (b.farmer_id !== existing.id) {
+      await updateSession(waFrom, { step: 'main_menu', data: {} });
+      return 'This booking does not belong to you. Reply *MENU* for options.';
+    }
+    if (b.status !== 'confirmed') {
+      await updateSession(waFrom, { step: 'main_menu', data: {} });
+      return `Booking is in status '${b.status}' and cannot be confirmed by farmer.`;
+    }
+
+    // Process payment release
+    try {
+      const res = await paymentProcessor.processPaymentRelease(bookingId, existing.id, false);
+      // Notify provider and farmer
+      try {
+        if (b.provider_phone) {
+          await sendBrandedText(b.provider_phone, `✅ *Payment released!*\n\nPayment for booking #${bookingId} has been released to your account.`);
+        }
+      } catch (notifyErr) {
+        console.error('Notify provider after payment release failed:', notifyErr.message);
+      }
+
+      await updateSession(waFrom, { step: 'main_menu', data: {} });
+      return `✅ Thank you — the provider has been notified and payment has been processed. Booking #${bookingId}.`;
+    } catch (err) {
+      console.error('Error releasing payment for booking', bookingId, err.message);
+      await updateSession(waFrom, { step: 'main_menu', data: {} });
+      return 'Sorry, we could not process the payment at the moment. Admin will review this booking.';
+    }
+  } catch (err) {
+    console.error('Farmer confirmation flow error:', err.message);
+    await updateSession(waFrom, { step: 'main_menu', data: {} });
+    return 'An error occurred. Reply *MENU* for options.';
+  }
 }
 
 async function handleProviderAcceptJob(waFrom, existing, bookingId) {

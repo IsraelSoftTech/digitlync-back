@@ -73,6 +73,7 @@ app.use('/api/admin-ratings', require('./routes/admin-ratings'));
 app.use('/api/analytics', require('./routes/analytics'));
 app.use('/api/ratings', require('./routes/ratings'));
 app.use('/api/notifications', require('./routes/notifications'));
+app.use('/api/admin-confirmations', require('./routes/admin-confirmations'));
 app.use('/api/audit-logs', require('./routes/audit-logs'));
 app.use('/api/public', require('./routes/public-metrics'));
 app.use('/api/public', require('./routes/public-farmer-gps'));
