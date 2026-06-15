@@ -26,19 +26,25 @@ router.get('/metrics', async (req, res) => {
   try {
     const r = await pool.query('SELECT COUNT(*)::int AS count FROM providers');
     providersCount = r.rows[0]?.count ?? 0;
-  } catch (_) {}
+  } catch (_) {
+    /* ignore providers count error */
+  }
 
   try {
     const r = await pool.query('SELECT COUNT(*)::int AS count FROM bookings');
     bookingsCount = r.rows[0]?.count ?? 0;
-  } catch (_) {}
+  } catch (_) {
+    /* ignore bookings count error */
+  }
 
   try {
     const r = await pool.query(
       "SELECT COUNT(*)::int AS count FROM bookings WHERE status = 'completed'"
     );
     completedCount = r.rows[0]?.count ?? 0;
-  } catch (_) {}
+  } catch (_) {
+    /* ignore completed count error */
+  }
 
   try {
     const r = await pool.query(`
@@ -48,7 +54,9 @@ router.get('/metrics', async (req, res) => {
         AND TRIM(COALESCE(district, division, region, village)) != ''
     `);
     activeRegionsCount = r.rows[0]?.count ?? 0;
-  } catch (_) {}
+  } catch (_) {
+    /* ignore active regions count error */
+  }
 
   try {
     const r = await pool.query(
@@ -56,7 +64,9 @@ router.get('/metrics', async (req, res) => {
     );
     const avg = r.rows[0]?.avg;
     averageRating = avg != null ? parseFloat(avg) : null;
-  } catch (_) {}
+  } catch (_) {
+    /* ignore average rating error */
+  }
 
   try {
     if (completedCount > 0 && bookingsCount > 0) {

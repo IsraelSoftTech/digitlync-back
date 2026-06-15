@@ -369,11 +369,7 @@ router.post('/:id/confirm', async (req, res) => {
  */
 router.post('/:id/complete', async (req, res) => {
   try {
-    const { paymentProcessor } = require('../services/payment-processor');
-    const {
-      processPaymentRelease,
-      sendPaymentReleasedNotification,
-    } = require('../services/payment-processor');
+    const { processPaymentRelease } = require('../services/payment-processor');
     const notifService = require('../services/notification-service');
 
     const bookingId = parseInt(req.params.id);

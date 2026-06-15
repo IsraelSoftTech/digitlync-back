@@ -13,17 +13,23 @@ router.get('/stats', async (req, res) => {
     try {
       const r = await pool.query('SELECT COUNT(*)::int AS count FROM providers');
       providersCount = r.rows[0]?.count ?? 0;
-    } catch (_) {}
+    } catch (_) {
+      /* ignore provider count errors */
+    }
     try {
       const r = await pool.query('SELECT COUNT(*)::int AS count FROM bookings');
       bookingsCount = r.rows[0]?.count ?? 0;
-    } catch (_) {}
+    } catch (_) {
+      /* ignore booking count errors */
+    }
 
     let pendingRequests = 0;
     try {
       const r = await pool.query("SELECT COUNT(*)::int AS count FROM bookings WHERE provider_id IS NULL AND status = 'pending'");
       pendingRequests = r.rows[0]?.count ?? 0;
-    } catch (_) {}
+    } catch (_) {
+      /* ignore pending requests count errors */
+    }
 
     res.json({
       farmers: farmersCount,

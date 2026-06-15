@@ -33,7 +33,7 @@ router.get('/', async (req, res) => {
        GROUP BY p.id, p.full_name
        HAVING AVG(fr.rating) < 3.5`
     );
-    lowRated.rows.forEach((r, i) => {
+    lowRated.rows.forEach((r) => {
       alerts.push({
         id: `low-rating-${r.id}`,
         type: 'performance',

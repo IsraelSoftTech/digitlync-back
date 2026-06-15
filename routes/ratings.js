@@ -22,7 +22,9 @@ router.get('/summary', async (req, res) => {
        GROUP BY p.id, p.full_name, p.services_offered
        ORDER BY avg_rating DESC`
       );
-    } catch (_) {}
+    } catch (_) {
+      /* ignore ratings query errors */
+    }
 
     const avg = parseFloat(avgRes.rows[0]?.avg) || 0;
     const total = avgRes.rows[0]?.total ?? 0;
@@ -57,7 +59,9 @@ router.get('/recent', async (req, res) => {
        JOIN bookings b ON b.id = fr.booking_id
        ORDER BY fr.created_at DESC LIMIT 20`
       );
-    } catch (_) {}
+    } catch (_) {
+      /* ignore recent ratings query errors */
+    }
     res.json({ ratings: r.rows });
   } catch (err) {
     console.error('Ratings recent error:', err);
