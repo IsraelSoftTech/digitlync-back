@@ -9,6 +9,7 @@ const {
   calculateCancellationFee,
   validateSchedulingWindow,
 } = require('../services/operational-core');
+const { ensureOperationalSchema } = require('../services/operational-core');
 
 router.get('/', async (req, res) => {
   const { status, unassigned } = req.query;
@@ -374,7 +375,8 @@ router.post('/:id/complete', async (req, res) => {
 
     const bookingId = parseInt(req.params.id);
 
-    // Release payment
+    // Ensure schema and then release payment
+    await ensureOperationalSchema();
     const paymentResult = await processPaymentRelease(bookingId);
 
     // Get booking and related data for notification

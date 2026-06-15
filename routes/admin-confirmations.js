@@ -3,6 +3,7 @@ const router = express.Router();
 const { pool } = require('../config/db');
 const { requireAdmin } = require('../middleware/admin-auth');
 const paymentProcessor = require('../services/payment-processor');
+const { ensureOperationalSchema } = require('../services/operational-core');
 
 // GET /api/admin-confirmations/ - list recent bookings needing confirmations / payments
 router.get('/', requireAdmin, async (req, res) => {
@@ -28,6 +29,8 @@ router.post('/:id/release', requireAdmin, async (req, res) => {
   const bookingId = parseInt(req.params.id, 10);
   if (!bookingId) return res.status(400).json({ ok: false, error: 'invalid_booking_id' });
   try {
+    // Ensure booking_payments and related schema exists (safe to run repeatedly)
+    await ensureOperationalSchema();
     const result = await paymentProcessor.processPaymentRelease(bookingId, null, true);
     res.json({ ok: true, result });
   } catch (err) {

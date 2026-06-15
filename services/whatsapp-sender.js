@@ -167,7 +167,20 @@ async function sendInteractiveList(to, { header, body, footer, buttonText, secti
   if (!res.ok) {
     const errBody = await res.text();
     console.error('[WhatsApp] Meta API list error', res.status, errBody);
-    throw new Error(`Meta WhatsApp API error ${res.status}: ${errBody}`);
+    // Attempt a graceful fallback for clients or situations where interactive lists fail
+    try {
+      // Build a numbered plain-text fallback from sections/rows
+      const flatRows = (sections || []).reduce((acc, sec) => acc.concat(sec.rows || []), []);
+      const rowsText = flatRows
+        .map((r, i) => `${i + 1}. ${r.title}${r.description ? ' — ' + r.description : ''}`)
+        .join('\n');
+      const fallbackBody = `${header ? header + '\n\n' : ''}${String(body)}\n\n${rowsText}\n\nReply with the number or text of your choice.`;
+      // Send fallback as branded text (use image caption fallback already handled in sendBrandedText)
+      return await sendText(to, buildBrandedBody(fallbackBody));
+    } catch (fallbackErr) {
+      console.error('[WhatsApp] Interactive list fallback failed:', fallbackErr.message);
+      throw new Error(`Meta WhatsApp API error ${res.status}: ${errBody}`);
+    }
   }
 
   const data = await res.json();
