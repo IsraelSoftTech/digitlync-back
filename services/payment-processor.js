@@ -34,9 +34,9 @@ async function processPaymentRelease(bookingId, farmerId, verifiedByAdmin = fals
   try {
     await client.query('BEGIN');
 
-    // Get booking details
+    // Get booking details (providers table does not store payout preferences)
     const bookingRes = await client.query(
-      `SELECT b.*, p.id as provider_id, p.phone, p.payout_method, 
+      `SELECT b.*, p.id as provider_id, p.phone, 
               f.id as farmer_id, f.phone as farmer_phone
        FROM bookings b
        LEFT JOIN providers p ON b.provider_id = p.id
@@ -50,6 +50,13 @@ async function processPaymentRelease(bookingId, farmerId, verifiedByAdmin = fals
     }
 
     const booking = bookingRes.rows[0];
+
+    // Read any previously saved payout method for this booking (booking_payments.payout_method)
+    const bpRes = await client.query(
+      `SELECT payout_method FROM booking_payments WHERE booking_id = $1`,
+      [bookingId]
+    );
+    const payoutMethod = (bpRes.rows[0] && bpRes.rows[0].payout_method) || 'mobile_money';
 
     // Check if already released
     if (booking.payment_status === 'released') {
@@ -103,7 +110,7 @@ async function processPaymentRelease(bookingId, farmerId, verifiedByAdmin = fals
         booking.farmer_payable_amount_fcfa,
         providerAmount,
         platformFee,
-        booking.payout_method || 'mobile_money',
+        payoutMethod,
       ]
     );
 
@@ -128,7 +135,7 @@ async function processPaymentRelease(bookingId, farmerId, verifiedByAdmin = fals
       const payoutResult = await payoutAdapter.queuePayout({
         providerId: booking.provider_id,
         amountFcfa: providerAmount,
-        method: booking.payout_method || 'mobile_money',
+        method: payoutMethod,
         providerDetails: { phone: booking.phone },
       });
 
@@ -137,7 +144,7 @@ async function processPaymentRelease(bookingId, farmerId, verifiedByAdmin = fals
         bookingId,
         providerAmount,
         platformFee,
-        payoutMethod: booking.payout_method || 'mobile_money',
+        payoutMethod: payoutMethod,
         providerId: booking.provider_id,
         providerPhone: booking.phone,
         payoutResult,
@@ -150,7 +157,7 @@ async function processPaymentRelease(bookingId, farmerId, verifiedByAdmin = fals
         bookingId,
         providerAmount,
         platformFee,
-        payoutMethod: booking.payout_method || 'mobile_money',
+        payoutMethod: payoutMethod,
         providerId: booking.provider_id,
         providerPhone: booking.phone,
         payoutResult: { success: false, error: err.message },

@@ -1437,6 +1437,58 @@ async function handleRequestFlow(waFrom, session, data, text, latitude, longitud
 async function handleProviderFlow(waFrom, session, data, text, latitude, longitude) {
   const phone = normalizePhone(waFrom);
 
+  // Provider: handle payout method selection and payout number collection
+  if (session.step === 'provider_await_payout_method') {
+    const choice = String(text || '').trim();
+    let method = null;
+    if (choice === '1' || choice.toLowerCase().includes('mobile')) method = 'mobile_money';
+    else if (choice === '2' || choice.toLowerCase().includes('orange')) method = 'orange_money';
+    if (!method) {
+      return 'Reply with *1* for Mobile Money or *2* for Orange Money.';
+    }
+    const bookingId = data?.booking_id;
+    if (!bookingId) {
+      await updateSession(waFrom, { step: 'main_menu', data: {} });
+      return 'Booking context lost. Reply *MENU* for options.';
+    }
+    try {
+      await pool.query(
+        `INSERT INTO booking_payments (booking_id, escrow_amount_fcfa, provider_amount_fcfa, platform_fee_amount_fcfa, payment_status, payout_method, created_at, updated_at)
+         VALUES ($1, 0, 0, 0, 'held', $2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+         ON CONFLICT (booking_id) DO UPDATE SET payout_method = EXCLUDED.payout_method, updated_at = CURRENT_TIMESTAMP`,
+        [bookingId, method]
+      );
+      await updateSession(waFrom, { step: 'provider_await_payout_number', data: { booking_id: bookingId, payout_method: method } });
+      return 'Please send the payout number (include country code). Example: +2376xxxxxxx';
+    } catch (err) {
+      console.error('Error saving payout method:', err.message);
+      await updateSession(waFrom, { step: 'main_menu', data: {} });
+      return 'Sorry, we could not save your payout method. Please try again later.';
+    }
+  }
+
+  if (session.step === 'provider_await_payout_number') {
+    const bookingId = data?.booking_id;
+    const method = data?.payout_method || 'mobile_money';
+    const number = String(text || '').trim();
+    const digits = phoneDigits(number);
+    if (!digits || digits.length < 6) return 'Please send a valid phone number including country code. Example: +2376xxxxxxx';
+    try {
+      await pool.query(
+        `INSERT INTO booking_payments (booking_id, escrow_amount_fcfa, provider_amount_fcfa, platform_fee_amount_fcfa, payment_status, payout_method, payout_reference, created_at, updated_at)
+         VALUES ($1, 0, 0, 0, 'held', $2, $3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+         ON CONFLICT (booking_id) DO UPDATE SET payout_method = COALESCE(EXCLUDED.payout_method, booking_payments.payout_method), payout_reference = EXCLUDED.payout_reference, updated_at = CURRENT_TIMESTAMP`,
+        [bookingId, method, digits]
+      );
+      await updateSession(waFrom, { step: 'main_menu', data: {} });
+      return `Thanks — payout method saved as ${method.replace('_', ' ')} and number ${digits}. Admin will use this to process payment.`;
+    } catch (err) {
+      console.error('Error saving payout number:', err.message);
+      await updateSession(waFrom, { step: 'main_menu', data: {} });
+      return 'Sorry, we could not save your payout number. Please try again later.';
+    }
+  }
+
   if (session.step === 'provider_batched') {
     const kv = parseKeyValueBlock(text);
     const name = kv.name || kv.full_name;
@@ -1889,6 +1941,13 @@ async function handleProviderAcceptJob(waFrom, existing, bookingId) {
     } catch (e) {
       console.error('WhatsApp notify farmer failed:', e);
     }
+    // Ask provider for preferred payout method so admin can release payment later
+    try {
+      await updateSession(waFrom, { step: 'provider_await_payout_method', data: { booking_id: bookingId } });
+    } catch (e) {
+      console.error('Failed to set provider payout step:', e.message);
+    }
+
     return (
       '✅ Job accepted.\n\n' +
       '*Provider confirmation terms:*\n' +
@@ -1898,7 +1957,8 @@ async function handleProviderAcceptJob(waFrom, existing, bookingId) {
       `Farm location: ${b.farm_location || 'Shared in booking details'}\n\n` +
       'Payment is released only after farmer confirms 100% completion. Partial jobs are not eligible for payout. ' +
       'If service is abandoned or disputed, payment remains on hold during investigation.\n\n' +
-      'Reply *MENU* for options.'
+      'Reply *MENU* for options.\n\n' +
+      'To receive payout, please choose a payout method:\n1. Mobile Money\n2. Orange Money\n\nReply with the number of your choice.'
     );
   } catch (err) {
     return 'Something went wrong. Reply *4* to try again.';
