@@ -151,6 +151,19 @@ async function ensureOperationalSchema() {
       UNIQUE(booking_id, interval_label, recipient_type)
     )
   `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS booking_confirmation_tokens (
+      id SERIAL PRIMARY KEY,
+      token VARCHAR(255) NOT NULL UNIQUE,
+      booking_id INTEGER NOT NULL REFERENCES bookings(id) ON DELETE CASCADE,
+      role VARCHAR(20) NOT NULL,
+      used BOOLEAN DEFAULT FALSE,
+      expires_at TIMESTAMP,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      used_at TIMESTAMP
+    )
+  `);
 }
 
 module.exports = {

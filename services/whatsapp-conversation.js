@@ -1898,24 +1898,22 @@ async function handleFarmerConfirmationsFlow(waFrom, existing, text, data) {
       return `Booking is in status '${b.status}' and cannot be confirmed by farmer.`;
     }
 
-    // Process payment release
+    // Instead of releasing payment immediately, generate a portal token and send a secure link
     try {
-      const res = await paymentProcessor.processPaymentRelease(bookingId, existing.id, false);
-      // Notify provider and farmer
-      try {
-        if (b.provider_phone) {
-          await sendBrandedText(b.provider_phone, `✅ *Payment released!*\n\nPayment for booking #${bookingId} has been released to your account.`);
-        }
-      } catch (notifyErr) {
-        console.error('Notify provider after payment release failed:', notifyErr.message);
-      }
-
+      const token = crypto.randomUUID();
+      await pool.query(
+        `INSERT INTO booking_confirmation_tokens (token, booking_id, role, expires_at) VALUES ($1, $2, 'farmer', (CURRENT_TIMESTAMP + INTERVAL '14 days'))`,
+        [token, bookingId]
+      );
+      const front = getFrontendBaseUrl();
+      const link = `${front}/confirm-work?t=${encodeURIComponent(token)}`;
+      // Reply with the portal link so farmer can open and confirm/reject via the web UI
       await updateSession(waFrom, { step: 'main_menu', data: {} });
-      return `✅ Thank you — the provider has been notified and payment has been processed. Booking #${bookingId}.`;
+      return `✅ Thank you. To confirm this job, open the link below and submit your confirmation:\n\n${link}`;
     } catch (err) {
-      console.error('Error releasing payment for booking', bookingId, err.message);
+      console.error('Error creating confirmation token for farmer:', err.message);
       await updateSession(waFrom, { step: 'main_menu', data: {} });
-      return 'Sorry, we could not process the payment at the moment. Admin will review this booking.';
+      return 'Accepted — but we could not generate a confirmation link. Admin will review this booking.';
     }
   } catch (err) {
     console.error('Farmer confirmation flow error:', err.message);
@@ -1941,13 +1939,7 @@ async function handleProviderAcceptJob(waFrom, existing, bookingId) {
     } catch (e) {
       console.error('WhatsApp notify farmer failed:', e);
     }
-    // Ask provider for preferred payout method so admin can release payment later
-    try {
-      await updateSession(waFrom, { step: 'provider_await_payout_method', data: { booking_id: bookingId } });
-    } catch (e) {
-      console.error('Failed to set provider payout step:', e.message);
-    }
-
+    // Do not request payout details via WhatsApp. Provider will receive a secure portal link after farmer confirmation.
     return (
       '✅ Job accepted.\n\n' +
       '*Provider confirmation terms:*\n' +
@@ -1957,8 +1949,8 @@ async function handleProviderAcceptJob(waFrom, existing, bookingId) {
       `Farm location: ${b.farm_location || 'Shared in booking details'}\n\n` +
       'Payment is released only after farmer confirms 100% completion. Partial jobs are not eligible for payout. ' +
       'If service is abandoned or disputed, payment remains on hold during investigation.\n\n' +
-      'Reply *MENU* for options.\n\n' +
-      'To receive payout, please choose a payout method:\n1. Mobile Money\n2. Orange Money\n\nReply with the number of your choice.'
+      'You will receive a secure link to submit your payout details after the farmer confirms completion.\n\n' +
+      'Reply *MENU* for options.'
     );
   } catch (err) {
     return 'Something went wrong. Reply *4* to try again.';
