@@ -229,21 +229,6 @@ Check admin dashboard for details.`;
 
   try {
     console.log(`[Notifications] Dispute notification queued for admin: ${message}`);
-    // In production, send to admin WhatsApp or email
-  // Prefer payout info saved in booking_payments if present
-  let payoutMethod = booking.payout_method || 'Mobile Money';
-  let payoutRef = '';
-  try {
-    const bp = await pool.query('SELECT payout_method, payout_reference FROM booking_payments WHERE booking_id = $1', [bookingId]);
-    if (bp.rows.length > 0) {
-      payoutMethod = bp.rows[0].payout_method || payoutMethod;
-      payoutRef = bp.rows[0].payout_reference || '';
-    }
-  } catch (e) {
-    // ignore
-  }
-
-  const providerMsg = `💰 Payment Released!
   } catch (err) {
     console.error(`[Notifications] Failed to send dispute notification:`, err.message);
   }

@@ -169,37 +169,29 @@ router.post('/json/farmer/submit', express.json(), async (req, res) => {
       }
       const booking = br.rows[0];
       if (decision === 'confirm') {
-        await client.query(`UPDATE bookings SET status = 'completed', completion_verified_at = CURRENT_TIMESTAMP WHERE id = $1`, [booking.id]);
-        await client.query(`INSERT INTO booking_payments (booking_id, escrow_amount_fcfa, provider_amount_fcfa, platform_fee_amount_fcfa, payment_status, created_at, updated_at)
-          VALUES ($1, 0, 0, 0, 'held', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-          ON CONFLICT (booking_id) DO NOTHING`, [booking.id]);
-        await client.query(`INSERT INTO booking_job_events (booking_id, actor_type, event_type, note) VALUES ($1, 'farmer', 'confirmed', 'Farmer confirmed via portal')`, [booking.id]);
+        await client.query(
+          `INSERT INTO booking_job_events (booking_id, actor_type, event_type, note) VALUES ($1, 'farmer', 'confirmed', 'Farmer confirmed via portal')`,
+          [booking.id]
+        );
       } else {
         await client.query(`UPDATE bookings SET status = 'disputed' WHERE id = $1`, [booking.id]);
-        await client.query(`INSERT INTO booking_job_events (booking_id, actor_type, event_type, note) VALUES ($1, 'farmer', 'rejected', 'Farmer rejected via portal')`, [booking.id]);
+        await client.query(
+          `INSERT INTO booking_job_events (booking_id, actor_type, event_type, note) VALUES ($1, 'farmer', 'rejected', 'Farmer rejected via portal')`,
+          [booking.id]
+        );
       }
 
       await client.query(`UPDATE booking_confirmation_tokens SET used = TRUE, used_at = CURRENT_TIMESTAMP WHERE id = $1`, [t.id]);
+      await client.query('COMMIT');
 
-      if (decision === 'confirm' && booking.provider_id) {
-        const prov = await client.query('SELECT phone, full_name FROM providers WHERE id = $1', [booking.provider_id]);
-        if (prov.rows.length > 0) {
-          const provider = prov.rows[0];
-          const providerToken = crypto.randomUUID();
-          await client.query(
-            `INSERT INTO booking_confirmation_tokens (token, booking_id, role, expires_at) VALUES ($1, $2, 'provider', (CURRENT_TIMESTAMP + INTERVAL '7 days'))`,
-            [providerToken, booking.id]
-          );
-          const link = `${process.env.FRONTEND_URL || ''}/provider-payout?t=${encodeURIComponent(providerToken)}`;
-          try {
-            await sendBrandedText(provider.phone, `✅ Your service has been confirmed by the farmer. Please provide your payout method here: ${link}`);
-          } catch (e) {
-            console.error('Failed to notify provider portal link:', e.message);
-          }
+      if (decision === 'confirm') {
+        try {
+          const { confirmWorkAndReleasePayment } = require('../services/matching-flow');
+          await confirmWorkAndReleasePayment(booking.id, booking.farmer_id);
+        } catch (releaseErr) {
+          console.error('Portal confirm work release error:', releaseErr.message);
         }
       }
-
-      await client.query('COMMIT');
     } catch (txErr) {
       await client.query('ROLLBACK').catch(() => {});
       throw txErr;

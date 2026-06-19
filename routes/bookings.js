@@ -247,40 +247,11 @@ router.put('/:id', async (req, res) => {
     if (provider_id != null && !prev.provider_id && booking.provider_id) {
       auditMsg = ` provider assigned (ID ${provider_id})`;
       if (isEnabled()) {
-        const p = await pool.query(`SELECT full_name, phone FROM providers WHERE id = $1`, [provider_id]);
-        const f = await pool.query(`SELECT full_name, phone FROM farmers WHERE id = $1`, [booking.farmer_id]);
-        const providerName = p.rows[0]?.full_name || 'Provider';
-        if (p.rows.length > 0 && p.rows[0].phone) {
-          try {
-            await sendBotReply(
-              p.rows[0].phone,
-              buildOptionListReply(
-                `🔔 *New job request #${booking.id}*\n\n` +
-                  `Farmer: ${f.rows[0]?.full_name || prev.farmer_name}\n` +
-                  `Service: ${booking.service_type}\n` +
-                  `Size: ${booking.farm_size_ha || '—'} ha\n` +
-                  `Date: ${booking.scheduled_date || 'TBD'}`,
-                [
-                  { id: `accept_${booking.id}`, title: 'Accept', description: 'Confirm this booking' },
-                  { id: `reject_${booking.id}`, title: 'Reject', description: 'Decline this booking' },
-                ]
-              )
-            );
-          } catch (e) {
-            console.error('[Bookings] WhatsApp notify provider failed:', e);
-          }
-        }
-        if (f.rows.length > 0 && f.rows[0].phone) {
-          try {
-            await sendBrandedText(f.rows[0].phone,
-              `✅ *Provider assigned!*\n\n` +
-              `*${providerName}* has been assigned to your *${booking.service_type}* request.\n\n` +
-              `Final Amount (incl. DigiLync fee): ${(booking.farmer_payable_amount_fcfa || 0).toLocaleString()} FCFA\n` +
-              `They will confirm shortly. Reply *MENU* for options.`
-            );
-          } catch (e) {
-            console.error('[Bookings] WhatsApp notify farmer failed:', e);
-          }
+        try {
+          const { adminAssignProviderMatch } = require('../services/matching-flow');
+          await adminAssignProviderMatch(booking.id, booking.provider_id);
+        } catch (e) {
+          console.error('[Bookings] manual match notify failed:', e.message);
         }
       }
     }
@@ -314,6 +285,36 @@ router.delete('/:id', async (req, res) => {
   } catch (err) {
     console.error('Booking delete error:', err);
     res.status(500).json({ error: 'Failed to delete booking' });
+  }
+});
+
+/**
+ * POST /api/bookings/:id/match
+ * Admin manual match — assign provider and trigger bot match notifications
+ */
+router.post('/:id/match', async (req, res) => {
+  const bookingId = parseInt(req.params.id, 10);
+  const providerId = parseInt(req.body?.provider_id, 10);
+  if (!bookingId || !providerId) {
+    return res.status(400).json({ error: 'booking id and provider_id are required' });
+  }
+  try {
+    await ensureOperationalSchema();
+    const { adminAssignProviderMatch } = require('../services/matching-flow');
+    const booking = await adminAssignProviderMatch(bookingId, providerId);
+    const { adminId, adminUsername } = getAdminFromRequest(req);
+    await logAudit({
+      adminId,
+      adminUsername,
+      actionType: 'booking',
+      action: `Manual match: booking ${bookingId} → provider ${providerId}`,
+      entityType: 'booking',
+      entityId: bookingId,
+    });
+    res.json({ ok: true, booking });
+  } catch (err) {
+    console.error('Booking match error:', err);
+    res.status(500).json({ error: err.message || 'Failed to match booking' });
   }
 });
 
@@ -370,39 +371,14 @@ router.post('/:id/confirm', async (req, res) => {
  */
 router.post('/:id/complete', async (req, res) => {
   try {
-    const { processPaymentRelease } = require('../services/payment-processor');
-    const notifService = require('../services/notification-service');
-
-    const bookingId = parseInt(req.params.id);
-
-    // Ensure schema and then release payment
+    const { confirmWorkAndReleasePayment } = require('../services/matching-flow');
+    const bookingId = parseInt(req.params.id, 10);
     await ensureOperationalSchema();
-    const paymentResult = await processPaymentRelease(bookingId);
-
-    // Get booking and related data for notification
-    const bookingRes = await pool.query(
-      `SELECT b.*, f.id as farmer_id, f.full_name as farmer_name, f.phone as farmer_phone,
-              p.id as provider_id, p.full_name as provider_name, p.phone as provider_phone
-       FROM bookings b
-       LEFT JOIN farmers f ON b.farmer_id = f.id
-       LEFT JOIN providers p ON b.provider_id = p.id
-       WHERE b.id = $1`,
-      [bookingId]
-    );
-
-    if (bookingRes.rows.length > 0) {
-      const booking = bookingRes.rows[0];
-      const farmer = { id: booking.farmer_id, full_name: booking.farmer_name, phone: booking.farmer_phone };
-      const provider = { id: booking.provider_id, full_name: booking.provider_name, phone: booking.provider_phone };
-
-      // Send payment notifications
-      await notifService.sendPaymentReleasedNotification(bookingId, farmer, provider, booking);
-    }
-
+    const result = await confirmWorkAndReleasePayment(bookingId, null);
     res.json({
       success: true,
-      ...paymentResult,
-      message: 'Payment released and notifications sent',
+      ...result.paymentResult,
+      message: 'Work confirmed and payment released',
     });
   } catch (err) {
     console.error('Booking completion error:', err);

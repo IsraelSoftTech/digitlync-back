@@ -18,6 +18,17 @@ const {
   calculateBookingEconomics,
   validateSchedulingWindow,
 } = require('./operational-core');
+const {
+  pickBestProvider,
+  initiateAutoMatch,
+  cancelMatchedBooking,
+  simulateFarmerEscrowPayment,
+  saveProviderPayoutMethod,
+  confirmWorkAndReleasePayment,
+  getFarmerConfirmableBookings,
+  normalizePayoutMethod,
+  normalizeFarmerPaymentMethod,
+} = require('./matching-flow');
 
 const SERVICE_LIST = [
   'Ploughing', 'Planting', 'Spraying', 'Irrigation', 'Harvesting',
@@ -387,16 +398,27 @@ async function createBookingAndNotify(waFrom, existing, provider, data) {
 }
 
 function getMainMenuRows(existing = null) {
+  const isFarmer = existing?.type === 'farmer';
   const rows = [
     { id: 'main_1', title: 'Register Farmer', description: 'Sign up your farm' },
     { id: 'main_2', title: 'Register Provider', description: 'Offer ag services' },
     { id: 'main_3', title: 'Request Service', description: 'Book farm work' },
-    { id: 'main_4', title: 'My Requests', description: 'View bookings & jobs' },
-    { id: 'main_5', title: 'Help', description: 'How DigiLync works' },
   ];
-  if (existing) {
-    rows.push({ id: 'main_6', title: 'Unsubscribe', description: 'Remove your account' });
-    rows.push({ id: 'main_7', title: 'Recap', description: 'Profile & farm summary' });
+  if (isFarmer) {
+    rows.push({ id: 'main_4', title: 'Confirm Job', description: 'Confirm completed work' });
+    rows.push({ id: 'main_5', title: 'My Requests', description: 'View bookings and jobs' });
+    rows.push({ id: 'main_6', title: 'Help', description: 'How DigiLync works' });
+    if (existing) {
+      rows.push({ id: 'main_7', title: 'Unsubscribe', description: 'Remove your account' });
+      rows.push({ id: 'main_8', title: 'Recap', description: 'Profile and farm summary' });
+    }
+  } else {
+    rows.push({ id: 'main_4', title: 'My Requests', description: 'View bookings and jobs' });
+    rows.push({ id: 'main_5', title: 'Help', description: 'How DigiLync works' });
+    if (existing) {
+      rows.push({ id: 'main_6', title: 'Unsubscribe', description: 'Remove your account' });
+      rows.push({ id: 'main_7', title: 'Recap', description: 'Profile and farm summary' });
+    }
   }
   return rows;
 }
@@ -526,18 +548,29 @@ function parseFarmDetailsBatch(text) {
   return { farmSize, crop, serviceNums, serviceLabels };
 }
 
-function getHelpMessage() {
-  return (
+function getHelpMessage(existing = null) {
+  const isFarmer = existing?.type === 'farmer';
+  let msg =
     '\u{1F4D8} *Help*\n\n' +
-    '• *1 Farmer* — Admin areas + *GPS link* for your farm pin\n' +
-    '• *2 Provider* — Your rates & services, then *GPS link* for base location\n' +
-    '• *3 Request* — Pick a service & size, then *GPS link* to confirm the job location\n' +
-    '• *4 My Requests* — Your bookings / jobs\n' +
-    '• *5* — This help\n' +
-    '• *6 Unsubscribe* — Remove your Digilync registration (registered users)\n' +
-    '• *7 Recap* — See your profile / farms and next actions (registered users)\n\n' +
-    'Reply *MENU* to go back.'
-  );
+    '• *1 Farmer* — Register your farm with a GPS link\n' +
+    '• *2 Provider* — Register your services and base location\n' +
+    '• *3 Request* — Request a farm service (auto-matched to a provider)\n';
+  if (isFarmer) {
+    msg +=
+      '• *4 Confirm Job* — Confirm completed work and release payment\n' +
+      '• *5 My Requests* — View your bookings\n' +
+      '• *6* — This help\n' +
+      '• *7 Unsubscribe* — Remove your account\n' +
+      '• *8 Recap* — View your profile and farms\n\n';
+  } else {
+    msg +=
+      '• *4 My Requests* — View your bookings or jobs\n' +
+      '• *5* — This help\n' +
+      '• *6 Unsubscribe* — Remove your account\n' +
+      '• *7 Recap* — View your profile\n\n';
+  }
+  msg += 'Reply *MENU* to go back.';
+  return msg;
 }
 
 /** Shown immediately after farmer/provider registration; Agree completes onboarding, Disagree removes the new record. */
@@ -678,6 +711,10 @@ async function handleIncoming(waFrom, body, latitude, longitude, profileName) {
       (session.step.startsWith('farmer_') ||
         session.step.startsWith('provider_') ||
         session.step.startsWith('request_') ||
+        session.step.startsWith('match_') ||
+        session.step.startsWith('farmer_escrow') ||
+        session.step === 'confirm_job_select' ||
+        session.step === 'confirm_job_confirm' ||
         session.step === 'privacy_consent_new' ||
         session.step === 'unsubscribe_confirm' ||
         session.step === 'recap_options' ||
@@ -723,6 +760,28 @@ async function handleIncoming(waFrom, body, latitude, longitude, profileName) {
     return handleFarmerConfirmationsFlow(waFrom, existing, text, data);
   }
 
+  if (session.step === 'match_escrow_decision' && existing?.type === 'farmer') {
+    return handleMatchEscrowDecision(waFrom, existing, text, data);
+  }
+  if (session.step === 'farmer_escrow_method' && existing?.type === 'farmer') {
+    return handleFarmerEscrowMethod(waFrom, existing, text, data);
+  }
+  if (session.step === 'farmer_escrow_number' && existing?.type === 'farmer') {
+    return handleFarmerEscrowNumber(waFrom, existing, text, data);
+  }
+  if (session.step === 'farmer_escrow_confirm' && existing?.type === 'farmer') {
+    return handleFarmerEscrowConfirm(waFrom, existing, text, data);
+  }
+  if (session.step === 'confirm_job_select' && existing?.type === 'farmer') {
+    return handleConfirmJobSelect(waFrom, existing, text, data);
+  }
+  if (session.step === 'confirm_job_confirm' && existing?.type === 'farmer') {
+    return handleConfirmJobConfirm(waFrom, existing, text, data);
+  }
+  if (session.step === 'provider_match_payout_method' && existing?.type === 'provider') {
+    return handleProviderMatchPayoutMethod(waFrom, existing, text, data);
+  }
+
   if (session.step === 'add_farm_details' && existing && existing.type === 'farmer') {
     return handleAddFarmDetails(waFrom, existing, text, data);
   }
@@ -736,12 +795,15 @@ async function handleIncoming(waFrom, body, latitude, longitude, profileName) {
   }
 
   if (['help', '?'].includes(textLower)) {
-    return getHelpMessage();
+    return getHelpMessage(existing);
   }
 
-  // Help: "5" only when not in a flow where "5" might be real input (e.g. farm size)
-  if (textLower === '5' && !inActiveFlow) {
-    return getHelpMessage();
+  // Help shortcut only when not in an active flow
+  if (textLower === '5' && !inActiveFlow && existing?.type !== 'farmer') {
+    return getHelpMessage(existing);
+  }
+  if (textLower === '6' && !inActiveFlow && existing?.type === 'farmer') {
+    return getHelpMessage(existing);
   }
 
   // Unregistered: switch Farmer ↔ Provider signup or resend GPS link
@@ -781,12 +843,20 @@ async function handleIncoming(waFrom, body, latitude, longitude, profileName) {
     }
   }
 
-  // Registered user: main-menu shortcuts only (do not steal 3–7 during request / provider-pick flows)
+  // Registered user: main-menu shortcuts only (do not steal numbers during request flows)
   if (existing && !inActiveFlow) {
-    if (text === '4') return handleMyRequests(waFrom, existing);
-    if (text === '5') return getHelpMessage();
-    if (text === '6') return handleUnsubscribeFlow(waFrom, existing);
-    if (text === '7') return handleRecap(waFrom, existing, true);
+    if (existing.type === 'farmer') {
+      if (text === '4') return handleConfirmJobMenu(waFrom, existing);
+      if (text === '5') return handleMyRequests(waFrom, existing);
+      if (text === '6') return getHelpMessage(existing);
+      if (text === '7') return handleUnsubscribeFlow(waFrom, existing);
+      if (text === '8') return handleRecap(waFrom, existing, true);
+    } else {
+      if (text === '4') return handleMyRequests(waFrom, existing);
+      if (text === '5') return getHelpMessage(existing);
+      if (text === '6') return handleUnsubscribeFlow(waFrom, existing);
+      if (text === '7') return handleRecap(waFrom, existing, true);
+    }
     if (text === '1' && existing.type === 'provider') {
       return (
         'You are already registered as a *service provider*. To register as a farmer, use a different WhatsApp number or contact support.\n\n' +
@@ -938,6 +1008,8 @@ async function applyServiceRequestGpsFromWeb(waPhone, lat, lng) {
   let serviceType;
   let farmSizeNum;
   let providers;
+  let requestPending;
+  let bestMatch;
 
   try {
     await client.query('BEGIN');
@@ -955,12 +1027,17 @@ async function applyServiceRequestGpsFromWeb(waPhone, lat, lng) {
       await client.query('ROLLBACK');
       return { ok: true, already_completed: true };
     }
+    if (session.step === 'match_escrow_decision') {
+      await client.query('ROLLBACK');
+      return { ok: true, already_completed: true };
+    }
     if (session.step !== 'request_await_gps_web' || !data.request_pending) {
       await client.query('ROLLBACK');
       return { ok: false, error: 'bad_step' };
     }
 
     const rp = data.request_pending;
+    requestPending = rp;
     serviceType = rp.service_type;
     farmSizeNum = parseFloat(rp.farm_size_ha);
     providers = await findMatchingProviders(serviceType, latN, lngN, rp.scheduled_date);
@@ -988,19 +1065,33 @@ async function applyServiceRequestGpsFromWeb(waPhone, lat, lng) {
       return { ok: true, no_match: true };
     }
 
-    const newData = {
-      farmer_id: existing.id,
-      service_type: serviceType,
-      farm_size_ha: farmSizeNum,
-      scheduled_date: rp.scheduled_date || null,
-      scheduled_time: rp.scheduled_time || null,
-      budget_min_fcfa: rp.budget_min_fcfa || null,
-      budget_max_fcfa: rp.budget_max_fcfa || null,
-      matched_providers: providers,
-    };
+    bestMatch = pickBestProvider(providers, farmSizeNum, rp.budget_min_fcfa, rp.budget_max_fcfa);
+    if (!bestMatch) {
+      await client.query(
+        `INSERT INTO bookings (
+          farmer_id, provider_id, service_type, status, farm_size_ha, scheduled_date, scheduled_time, budget_min_fcfa, budget_max_fcfa
+        ) VALUES ($1, NULL, $2, 'pending', $3, $4, $5, $6, $7) RETURNING id`,
+        [existing.id, serviceType, farmSizeNum, rp.scheduled_date || null, rp.scheduled_time || null, rp.budget_min_fcfa || null, rp.budget_max_fcfa || null]
+      );
+      await client.query(
+        `UPDATE whatsapp_sessions SET step = $2, data = $3::jsonb, updated_at = CURRENT_TIMESTAMP WHERE wa_phone = $1`,
+        [phone, 'main_menu', '{}']
+      );
+      await client.query('COMMIT');
+      try {
+        await sendBrandedText(
+          `whatsapp:${digits}`,
+          'Request received. No provider matched your budget and availability. Admin will assign one soon. Reply *MENU* for options.'
+        );
+      } catch (err) {
+        console.error('applyServiceRequestGpsFromWeb no-match notify:', err);
+      }
+      return { ok: true, no_match: true };
+    }
+
     await client.query(
       `UPDATE whatsapp_sessions SET step = $2, data = $3::jsonb, updated_at = CURRENT_TIMESTAMP WHERE wa_phone = $1`,
-      [phone, 'request_choose_provider', JSON.stringify(newData)]
+      [phone, 'main_menu', '{}']
     );
     await client.query('COMMIT');
   } catch (err) {
@@ -1012,12 +1103,19 @@ async function applyServiceRequestGpsFromWeb(waPhone, lat, lng) {
   }
 
   try {
-    await sendBotReply(`whatsapp:${digits}`, buildProviderChoiceListReply(providers, farmSizeNum));
+    await initiateAutoMatch(`whatsapp:${digits}`, existing, bestMatch.provider, {
+      service_type: serviceType,
+      farm_size_ha: farmSizeNum,
+      scheduled_date: requestPending.scheduled_date || null,
+      scheduled_time: requestPending.scheduled_time || null,
+      budget_min_fcfa: requestPending.budget_min_fcfa || null,
+      budget_max_fcfa: requestPending.budget_max_fcfa || null,
+    });
   } catch (err) {
-    console.error('applyServiceRequestGpsFromWeb provider list send:', err);
-    return { ok: false, error: 'send_failed' };
+    console.error('applyServiceRequestGpsFromWeb auto-match:', err);
+    return { ok: false, error: 'match_failed' };
   }
-  return { ok: true };
+  return { ok: true, matched: true };
 }
 
 async function handleFarmerFlow(waFrom, session, data, text, latitude, longitude) {
@@ -1396,37 +1494,6 @@ async function handleRequestFlow(waFrom, session, data, text, latitude, longitud
       });
       return 'Open the GPS link we sent, then return here. Reply *1* to resend. Reply *MENU* to cancel.';
     }
-
-    case 'request_choose_provider': {
-      const num = parseInt(text.trim(), 10);
-      const providers = data.matched_providers || [];
-      if (isNaN(num) || num < 1 || num > providers.length) {
-        return buildProviderChoiceListReply(providers, data.farm_size_ha || 0);
-      }
-      const provider = providers[num - 1];
-      await updateSession(waFrom, {
-        step: 'request_confirm',
-        data: { ...data, selected_provider: provider },
-      });
-      const estTotal = Math.round((parseFloat(provider.base_price_per_ha) || 0) * (data.farm_size_ha || 0));
-      return buildOptionListReply(
-        `You selected *${provider.full_name}*\n\nTotal cost: ${estTotal.toLocaleString()} FCFA`,
-        [
-          { id: 'confirm_1', title: 'Confirm', description: 'Submit this booking' },
-          { id: 'confirm_2', title: 'Cancel', description: 'Go back to menu' },
-        ]
-      );
-    }
-
-    case 'request_confirm':
-      if (text === '1' || text.toLowerCase() === 'confirm') {
-        return await createBookingAndNotify(waFrom, existing, data.selected_provider, data);
-      }
-      if (text === '2' || text.toLowerCase() === 'cancel') {
-        await updateSession(waFrom, { step: 'main_menu', data: {} });
-        return 'Request cancelled. Reply *MENU* for options.';
-      }
-      return 'Reply *1* to Confirm or *2* to Cancel.';
 
     default:
       await updateSession(waFrom, { step: 'main_menu', data: {} });
@@ -1815,7 +1882,8 @@ async function handleUnsubscribeConfirm(waFrom, existing, text) {
 async function handleMyRequests(waFrom, existing) {
   if (existing.type === 'farmer') {
     const r = await pool.query(
-      `SELECT b.id, b.service_type, b.farm_size_ha, b.status, b.scheduled_date, p.full_name AS provider_name, p.phone AS provider_phone
+      `SELECT b.id, b.service_type, b.farm_size_ha, b.status, b.scheduled_date, b.payment_status,
+              p.full_name AS provider_name
        FROM bookings b
        LEFT JOIN providers p ON b.provider_id = p.id
        WHERE b.farmer_id = $1
@@ -1824,21 +1892,16 @@ async function handleMyRequests(waFrom, existing) {
       [existing.id]
     );
     if (r.rows.length === 0) return 'You have no requests yet. Reply *3* to request a service.';
-
-    // Build interactive list where confirmed bookings can be "confirmed complete" by farmer
-    const rows = r.rows.map((b) => {
-      const descParts = [`${b.farm_size_ha} ha`, `[${b.status}]`];
-      if (b.provider_name) descParts.push(String(b.provider_name).slice(0, 32));
-      const available = b.status === 'confirmed' && b.provider_name ? true : false;
-      return {
-        id: `confirm_${b.id}`,
-        title: `${b.service_type} — ${b.scheduled_date || 'TBD'}`,
-        description: `${descParts.join(' · ').slice(0, 72)}` + (available ? ' · Tap to Confirm completion' : ''),
-      };
+    let msg = 'Your requests:\n\n';
+    r.rows.forEach((b, i) => {
+      msg += `${i + 1}. ${b.service_type} — ${b.scheduled_date || 'TBD'} — ${b.status}`;
+      if (b.provider_name) msg += ` — ${b.provider_name}`;
+      if (b.payment_status) msg += ` — ${b.payment_status}`;
+      msg += '\n';
     });
-
-    await updateSession(waFrom, { step: 'farmer_confirmations', data: { farmer_id: existing.id } });
-    return buildOptionListReply('📋 Your requests — tap a booking to confirm completion (provider will be paid after confirmation).', rows);
+    msg += '\nReply *4* to confirm completed work. Reply *MENU* for options.';
+    return msg;
+  }
   if (existing.type === 'provider') {
     const jobs = await pool.query(
       `SELECT b.id, b.service_type, b.farm_size_ha, b.status, f.full_name AS farmer_name
@@ -1858,6 +1921,172 @@ async function handleMyRequests(waFrom, existing) {
     return msg;
   }
   return getMainMenu();
+}
+
+async function handleConfirmJobMenu(waFrom, existing) {
+  const bookings = await getFarmerConfirmableBookings(existing.id);
+  if (bookings.length === 0) {
+    return 'You have no jobs ready to confirm. Jobs appear here after you pay to escrow and the provider completes the work. Reply *MENU* for options.';
+  }
+  const rows = bookings.map((b, i) => ({
+    id: `job_${b.id}`,
+    title: `${b.service_type}`.slice(0, 24),
+    description: `${b.provider_name || 'Provider'} · ${(b.farmer_payable_amount_fcfa || 0).toLocaleString()} FCFA`.slice(0, 72),
+  }));
+  await updateSession(waFrom, { step: 'confirm_job_select', data: { farmer_id: existing.id } });
+  return buildOptionListReply('Select a job to confirm as complete. The provider will be paid after you confirm.', rows);
+}
+
+async function handleConfirmJobSelect(waFrom, existing, text, data) {
+  const m = String(text || '').trim().match(/^job_(\d+)$/i) || String(text || '').trim().match(/^(\d+)$/);
+  const bookingId = m ? parseInt(m[1], 10) : NaN;
+  if (Number.isNaN(bookingId)) {
+    return handleConfirmJobMenu(waFrom, existing);
+  }
+  const br = await pool.query(
+    `SELECT b.id, b.service_type, b.farmer_payable_amount_fcfa, p.full_name AS provider_name
+     FROM bookings b
+     LEFT JOIN providers p ON b.provider_id = p.id
+     WHERE b.id = $1 AND b.farmer_id = $2 AND b.status = 'confirmed' AND b.payment_status = 'held'`,
+    [bookingId, existing.id]
+  );
+  if (br.rows.length === 0) {
+    await updateSession(waFrom, { step: 'main_menu', data: {} });
+    return 'That job is not available for confirmation. Reply *MENU* for options.';
+  }
+  const b = br.rows[0];
+  await updateSession(waFrom, {
+    step: 'confirm_job_confirm',
+    data: { booking_id: bookingId, service_type: b.service_type, provider_name: b.provider_name },
+  });
+  return (
+    `Confirm that *${b.service_type}* with *${b.provider_name || 'provider'}* is 100% complete?\n\n` +
+    `Amount: ${(b.farmer_payable_amount_fcfa || 0).toLocaleString()} FCFA\n\n` +
+    'Reply *1* to confirm.\nReply *0* to cancel.'
+  );
+}
+
+async function handleConfirmJobConfirm(waFrom, existing, text, data) {
+  const t = String(text || '').trim();
+  if (t === '0' || t.toLowerCase() === 'cancel') {
+    await updateSession(waFrom, { step: 'main_menu', data: {} });
+    return getMainMenu(existing);
+  }
+  if (t !== '1' && t.toLowerCase() !== 'confirm') {
+    return 'Reply *1* to confirm or *0* to cancel.';
+  }
+  try {
+    await confirmWorkAndReleasePayment(data.booking_id, existing.id);
+    await updateSession(waFrom, { step: 'main_menu', data: {} });
+    return (
+      `Thank you. *${data.service_type}* has been confirmed complete. Payment has been sent to *${data.provider_name || 'your provider'}*. Reply *MENU* for options.`
+    );
+  } catch (err) {
+    console.error('handleConfirmJobConfirm:', err.message);
+    await updateSession(waFrom, { step: 'main_menu', data: {} });
+    return 'We could not confirm this job. Please try again or contact support. Reply *MENU* for options.';
+  }
+}
+
+async function handleMatchEscrowDecision(waFrom, existing, text, data) {
+  const t = String(text || '').trim();
+  if (t === '0') {
+    if (data.booking_id) await cancelMatchedBooking(data.booking_id, existing.id).catch(() => {});
+    await updateSession(waFrom, { step: 'main_menu', data: {} });
+    return getMainMenu(existing);
+  }
+  if (t !== '1') {
+    return 'Reply *1* to pay to escrow or *0* to go back to the main menu.';
+  }
+  await updateSession(waFrom, {
+    step: 'farmer_escrow_method',
+    data: { ...data, farmer_id: existing.id },
+  });
+  return 'Enter payment method: *Momo* or *Orange Money*.';
+}
+
+async function handleFarmerEscrowMethod(waFrom, existing, text, data) {
+  const method = normalizeFarmerPaymentMethod(text);
+  if (!method) {
+    return 'Please reply with *Momo* or *Orange Money*.';
+  }
+  await updateSession(waFrom, {
+    step: 'farmer_escrow_number',
+    data: { ...data, payment_method: method },
+  });
+  return 'Number: (include country code, e.g. +2376xxxxxxx)';
+}
+
+async function handleFarmerEscrowNumber(waFrom, existing, text, data) {
+  const digits = phoneDigits(text);
+  if (!digits || digits.length < 9) {
+    return 'Please send a valid phone number including country code.';
+  }
+  const amount = data.service_cost || 0;
+  await updateSession(waFrom, {
+    step: 'farmer_escrow_confirm',
+    data: { ...data, payment_number: digits },
+  });
+  const methodLabel = data.payment_method === 'orange_money' ? 'Orange Money' : 'MoMo';
+  return (
+    `Payment summary:\n` +
+    `Method: ${methodLabel}\n` +
+    `Number: ${digits}\n` +
+    `Amount to pay: ${Number(amount).toLocaleString()} FCFA\n\n` +
+    'Your payment is protected in escrow. If the provider does not complete the work, your money will be returned.\n\n' +
+    'Reply *1* to confirm payment.\nReply *0* to cancel.'
+  );
+}
+
+async function handleFarmerEscrowConfirm(waFrom, existing, text, data) {
+  const t = String(text || '').trim();
+  if (t === '0' || t.toLowerCase() === 'cancel') {
+    if (data.booking_id) await cancelMatchedBooking(data.booking_id, existing.id).catch(() => {});
+    await updateSession(waFrom, { step: 'main_menu', data: {} });
+    return 'Payment cancelled. Reply *MENU* for options.';
+  }
+  if (t !== '1' && t.toLowerCase() !== 'confirm') {
+    return 'Reply *1* to confirm payment or *0* to cancel.';
+  }
+  try {
+    await simulateFarmerEscrowPayment(
+      data.booking_id,
+      existing.id,
+      data.payment_method,
+      data.payment_number
+    );
+    await updateSession(waFrom, { step: 'main_menu', data: {} });
+    return (
+      `Payment of ${Number(data.service_cost || 0).toLocaleString()} FCFA received and held in escrow for *${data.service_type}* with *${data.provider_name}*.\n\n` +
+      'When the work is complete, use *Confirm Job* from the main menu. Reply *MENU* for options.'
+    );
+  } catch (err) {
+    console.error('handleFarmerEscrowConfirm:', err.message);
+    await updateSession(waFrom, { step: 'main_menu', data: {} });
+    return 'Payment could not be processed. Please try again from *Request Service*. Reply *MENU* for options.';
+  }
+}
+
+async function handleProviderMatchPayoutMethod(waFrom, existing, text, data) {
+  const method = normalizePayoutMethod(text);
+  if (!method) {
+    return 'Reply *1* for MoMo or *0* for Orange Money.';
+  }
+  const bookingId = data?.booking_id;
+  if (!bookingId) {
+    await updateSession(waFrom, { step: 'main_menu', data: {} });
+    return 'Session expired. Reply *MENU* for options.';
+  }
+  try {
+    await saveProviderPayoutMethod(bookingId, existing.id, method);
+    await updateSession(waFrom, { step: 'main_menu', data: {} });
+    const label = method === 'orange_money' ? 'Orange Money' : 'MoMo';
+    return `Your payout method (${label}) has been saved. You will be paid when the farmer confirms the job is complete. Reply *MENU* for options.`;
+  } catch (err) {
+    console.error('handleProviderMatchPayoutMethod:', err.message);
+    await updateSession(waFrom, { step: 'main_menu', data: {} });
+    return 'We could not save your payout method. Reply *MENU* to try again.';
+  }
 }
 
 async function handleFarmerConfirmationsFlow(waFrom, existing, text, data) {
@@ -1895,25 +2124,17 @@ async function handleFarmerConfirmationsFlow(waFrom, existing, text, data) {
     }
     if (b.status !== 'confirmed') {
       await updateSession(waFrom, { step: 'main_menu', data: {} });
-      return `Booking is in status '${b.status}' and cannot be confirmed by farmer.`;
+      return `Booking is in status '${b.status}' and cannot be confirmed yet.`;
     }
 
-    // Instead of releasing payment immediately, generate a portal token and send a secure link
     try {
-      const token = crypto.randomUUID();
-      await pool.query(
-        `INSERT INTO booking_confirmation_tokens (token, booking_id, role, expires_at) VALUES ($1, $2, 'farmer', (CURRENT_TIMESTAMP + INTERVAL '14 days'))`,
-        [token, bookingId]
-      );
-      const front = getFrontendBaseUrl();
-      const link = `${front}/confirm-work?t=${encodeURIComponent(token)}`;
-      // Reply with the portal link so farmer can open and confirm/reject via the web UI
+      await confirmWorkAndReleasePayment(bookingId, existing.id);
       await updateSession(waFrom, { step: 'main_menu', data: {} });
-      return `✅ Thank you. To confirm this job, open the link below and submit your confirmation:\n\n${link}`;
+      return 'Thank you. The job has been confirmed and payment has been sent to the provider. Reply *MENU* for options.';
     } catch (err) {
-      console.error('Error creating confirmation token for farmer:', err.message);
+      console.error('Farmer confirmation flow error:', err.message);
       await updateSession(waFrom, { step: 'main_menu', data: {} });
-      return 'Accepted — but we could not generate a confirmation link. Admin will review this booking.';
+      return 'An error occurred. Reply *MENU* for options.';
     }
   } catch (err) {
     console.error('Farmer confirmation flow error:', err.message);
@@ -1977,8 +2198,6 @@ async function handleProviderRejectJob(waFrom, existing, bookingId) {
   } catch (err) {
     return 'Something went wrong. Reply *4* to try again.';
   }
-}
-
 }
 
 module.exports = {

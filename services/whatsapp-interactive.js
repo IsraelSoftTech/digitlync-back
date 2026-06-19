@@ -73,10 +73,14 @@ function normalizeUserChoice(raw) {
     /^privacy_(\d+)$/i,
     /^prov_(\d+)$/i,
     /^confirm_(\d+)$/i,
+    /^job_(\d+)$/i,
   ];
   for (const re of patterns) {
     const m = t.match(re);
-    if (m) return m[1];
+    if (m) {
+      if (re.source.startsWith('^job_')) return `job_${m[1]}`;
+      return m[1];
+    }
   }
 
   const acceptM = t.match(/^accept_(\d+)$/i);
