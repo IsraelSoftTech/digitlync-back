@@ -36,6 +36,7 @@ function validateSchedulingWindow(scheduledDate) {
   return { ok: true };
 }
 
+/** Legacy ha-based pricing (fallback when no service rate card). */
 function calculateBookingEconomics({ providerBasePricePerHa, farmSizeHa }) {
   const basePricePerHa = Number(providerBasePricePerHa) || 0;
   const size = Number(farmSizeHa) || 0;
@@ -46,6 +47,37 @@ function calculateBookingEconomics({ providerBasePricePerHa, farmSizeHa }) {
     providerBaseAmount,
     platformFeeAmount,
     farmerPayableAmount,
+    estimatedDurationDays: null,
+    estimatedDurationHours: null,
+  };
+}
+
+/**
+ * Proportional pricing from a provider service rate card (operational spec §3).
+ */
+function calculateServiceEconomics({
+  minServiceQty,
+  basePriceFcfa,
+  requestedQty,
+  baseDurationDays = null,
+  baseDurationHours = null,
+}) {
+  const minQty = Number(minServiceQty) || 1;
+  const qty = Number(requestedQty) || 0;
+  const basePrice = Number(basePriceFcfa) || 0;
+  const scaleFactor = minQty > 0 ? qty / minQty : 0;
+  const providerBaseAmount = roundMoney(basePrice * scaleFactor);
+  const platformFeeAmount = roundMoney(providerBaseAmount * PLATFORM_COMMISSION_RATE);
+  const farmerPayableAmount = roundMoney(providerBaseAmount + platformFeeAmount);
+  const days = baseDurationDays != null ? roundMoney(Number(baseDurationDays) * scaleFactor) : null;
+  const hours = baseDurationHours != null ? roundMoney(Number(baseDurationHours) * scaleFactor) : null;
+  return {
+    providerBaseAmount,
+    platformFeeAmount,
+    farmerPayableAmount,
+    estimatedDurationDays: days,
+    estimatedDurationHours: hours,
+    scaleFactor,
   };
 }
 
@@ -153,6 +185,42 @@ async function ensureOperationalSchema() {
   `);
 
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS provider_services (
+      id SERIAL PRIMARY KEY,
+      provider_id INTEGER NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+      service_name VARCHAR(200) NOT NULL,
+      work_capacity_ha_per_hour DECIMAL(10, 2),
+      base_price_per_ha DECIMAL(12, 2),
+      country VARCHAR(100),
+      region VARCHAR(200),
+      division VARCHAR(200),
+      subdivision VARCHAR(200),
+      district VARCHAR(200),
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  await pool.query(`
+    ALTER TABLE provider_services
+      ADD COLUMN IF NOT EXISTS min_service_qty DECIMAL(10, 2),
+      ADD COLUMN IF NOT EXISTS service_unit VARCHAR(64),
+      ADD COLUMN IF NOT EXISTS service_unit_label VARCHAR(255),
+      ADD COLUMN IF NOT EXISTS base_price_fcfa DECIMAL(12, 2),
+      ADD COLUMN IF NOT EXISTS base_duration_days DECIMAL(10, 2),
+      ADD COLUMN IF NOT EXISTS base_duration_hours DECIMAL(10, 2),
+      ADD COLUMN IF NOT EXISTS work_capacity_notes TEXT
+  `);
+
+  await pool.query(`
+    ALTER TABLE bookings
+      ADD COLUMN IF NOT EXISTS availability_slot_id INTEGER REFERENCES provider_availability_slots(id) ON DELETE SET NULL,
+      ADD COLUMN IF NOT EXISTS requested_qty DECIMAL(10, 2),
+      ADD COLUMN IF NOT EXISTS provider_service_id INTEGER REFERENCES provider_services(id) ON DELETE SET NULL,
+      ADD COLUMN IF NOT EXISTS estimated_duration_days DECIMAL(10, 2),
+      ADD COLUMN IF NOT EXISTS estimated_duration_hours DECIMAL(10, 2)
+  `);
+
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS booking_confirmation_tokens (
       id SERIAL PRIMARY KEY,
       token VARCHAR(255) NOT NULL UNIQUE,
@@ -169,6 +237,7 @@ async function ensureOperationalSchema() {
 module.exports = {
   PLATFORM_COMMISSION_RATE,
   calculateBookingEconomics,
+  calculateServiceEconomics,
   calculateCancellationFee,
   validateSchedulingWindow,
   ensureOperationalSchema,

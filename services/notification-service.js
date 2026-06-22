@@ -75,7 +75,9 @@ Status: Payment HELD in Digilync escrow
 • Reliability affects your future recommendations
 
 ✅ To accept, reply with "ACCEPT"
-❌ To decline, reply with "DECLINE"`;
+❌ To decline, reply with "DECLINE"
+
+Use the job dashboard to Start / End the job on service day.`;
 
   try {
     await sendBrandedText(provider.phone, message);

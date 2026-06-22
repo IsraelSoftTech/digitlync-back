@@ -244,11 +244,47 @@ router.put('/:id', async (req, res) => {
 });
 
 async function insertProviderService(client, providerId, svc) {
-  const { service_name, work_capacity_ha_per_hour, base_price_per_ha, country, region, division, subdivision, district, equipment } = svc;
+  const {
+    service_name,
+    work_capacity_ha_per_hour,
+    base_price_per_ha,
+    min_service_qty,
+    service_unit,
+    service_unit_label,
+    base_price_fcfa,
+    base_duration_days,
+    base_duration_hours,
+    country,
+    region,
+    division,
+    subdivision,
+    district,
+    equipment,
+  } = svc;
   const svcResult = await client.query(
-    `INSERT INTO provider_services (provider_id, service_name, work_capacity_ha_per_hour, base_price_per_ha, country, region, division, subdivision, district)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
-    [providerId, service_name?.trim() || '', work_capacity_ha_per_hour != null ? parseFloat(work_capacity_ha_per_hour) : null, base_price_per_ha != null ? parseFloat(base_price_per_ha) : null, country?.trim() || null, region?.trim() || null, division?.trim() || null, subdivision?.trim() || null, district?.trim() || null]
+    `INSERT INTO provider_services (
+       provider_id, service_name, work_capacity_ha_per_hour, base_price_per_ha,
+       min_service_qty, service_unit, service_unit_label, base_price_fcfa,
+       base_duration_days, base_duration_hours, country, region, division, subdivision, district
+     )
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING id`,
+    [
+      providerId,
+      service_name?.trim() || '',
+      work_capacity_ha_per_hour != null ? parseFloat(work_capacity_ha_per_hour) : null,
+      base_price_per_ha != null ? parseFloat(base_price_per_ha) : null,
+      min_service_qty != null ? parseFloat(min_service_qty) : null,
+      service_unit?.trim() || null,
+      service_unit_label?.trim() || null,
+      base_price_fcfa != null ? parseFloat(base_price_fcfa) : null,
+      base_duration_days != null ? parseFloat(base_duration_days) : null,
+      base_duration_hours != null ? parseFloat(base_duration_hours) : null,
+      country?.trim() || null,
+      region?.trim() || null,
+      division?.trim() || null,
+      subdivision?.trim() || null,
+      district?.trim() || null,
+    ]
   );
   const svcId = svcResult.rows[0].id;
   const equipList = Array.isArray(equipment) ? equipment : [];

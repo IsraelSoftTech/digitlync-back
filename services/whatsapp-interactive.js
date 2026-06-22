@@ -74,11 +74,17 @@ function normalizeUserChoice(raw) {
     /^prov_(\d+)$/i,
     /^confirm_(\d+)$/i,
     /^job_(\d+)$/i,
+    /^pick_prov_(\d+)$/i,
+    /^rate_(\d+)$/i,
+    /^slot_(\d+)$/i,
   ];
   for (const re of patterns) {
     const m = t.match(re);
     if (m) {
       if (re.source.startsWith('^job_')) return `job_${m[1]}`;
+      if (re.source.startsWith('^rate_')) return `rate_${m[1]}`;
+      if (re.source.startsWith('^pick_prov_')) return `pick_prov_${m[1]}`;
+      if (re.source.startsWith('^slot_')) return `slot_${m[1]}`;
       return m[1];
     }
   }

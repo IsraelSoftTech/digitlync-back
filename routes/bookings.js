@@ -9,6 +9,7 @@ const {
   calculateCancellationFee,
   validateSchedulingWindow,
 } = require('../services/operational-core');
+const { resolveServiceRate } = require('../services/matching-flow');
 const { ensureOperationalSchema } = require('../services/operational-core');
 
 router.get('/', async (req, res) => {
@@ -77,13 +78,8 @@ router.post('/', async (req, res) => {
   try {
     let providerEconomics = { providerBaseAmount: null, platformFeeAmount: null, farmerPayableAmount: null };
     if (provider_id && farm_size_ha != null) {
-      const p = await pool.query('SELECT base_price_per_ha FROM providers WHERE id = $1', [provider_id]);
-      if (p.rows.length > 0) {
-        providerEconomics = calculateBookingEconomics({
-          providerBasePricePerHa: p.rows[0].base_price_per_ha,
-          farmSizeHa: farm_size_ha,
-        });
-      }
+      const { economics } = await resolveServiceRate(provider_id, service_type, farm_size_ha);
+      providerEconomics = economics;
     }
     const result = await pool.query(
       `INSERT INTO bookings (
@@ -162,10 +158,12 @@ router.put('/:id', async (req, res) => {
       farmerPayableAmount: prev.farmer_payable_amount_fcfa,
     };
     if (newProviderId && finalFarmSizeHa != null) {
-      const p = await pool.query('SELECT base_price_per_ha FROM providers WHERE id = $1', [newProviderId]);
-      if (p.rows.length > 0) {
-        economics = calculateBookingEconomics({ providerBasePricePerHa: p.rows[0].base_price_per_ha, farmSizeHa: finalFarmSizeHa });
-      }
+      const { economics: resolved } = await resolveServiceRate(
+        newProviderId,
+        prev.service_type,
+        finalFarmSizeHa
+      );
+      economics = resolved;
     }
     let cancellationRate = prev.cancellation_fee_rate;
     let cancellationAmount = prev.cancellation_fee_amount_fcfa;

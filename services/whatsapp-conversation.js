@@ -5,29 +5,27 @@
 const crypto = require('crypto');
 const { pool } = require('../config/db');
 const { sendBrandedText } = require('./whatsapp-sender');
-const paymentProcessor = require('./payment-processor');
 const {
   buildOptionListReply,
   buildServiceRows,
   normalizeUserChoice,
   sendBotReply,
 } = require('./whatsapp-interactive');
-const { haversineDistanceKm } = require('../utils/geo');
+const { validateSchedulingWindow } = require('./operational-core');
 const {
-  PLATFORM_COMMISSION_RATE,
-  calculateBookingEconomics,
-  validateSchedulingWindow,
-} = require('./operational-core');
+  beginProviderSelection,
+  showSlotsForProvider,
+  finalizeSlotAndNotifyProvider,
+  reofferAfterProviderReject,
+} = require('./booking-request-whatsapp');
 const {
-  pickBestProvider,
-  initiateAutoMatch,
   cancelMatchedBooking,
   simulateFarmerEscrowPayment,
-  saveProviderPayoutMethod,
   confirmWorkAndReleasePayment,
   getFarmerConfirmableBookings,
-  normalizePayoutMethod,
   normalizeFarmerPaymentMethod,
+  providerAcceptBooking,
+  providerRejectBooking,
 } = require('./matching-flow');
 
 const SERVICE_LIST = [
@@ -256,6 +254,36 @@ async function finalizeProviderRegistrationFromPendingGps(waPhone, pending, lat,
       [pending.name, phoneCanonical, pending.services.join(', '), haPerHour, pending.price, pending.radius, gpsLat, gpsLng]
     );
     const providerId = ins.rows[0].id;
+    if (pending.rateCards && pending.rateCards.length) {
+      for (const card of pending.rateCards) {
+        await pool.query(
+          `INSERT INTO provider_services (
+             provider_id, service_name, min_service_qty, service_unit, service_unit_label,
+             base_price_fcfa, base_duration_days, base_duration_hours, base_price_per_ha
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+          [
+            providerId,
+            card.service_name,
+            card.min_service_qty,
+            card.service_unit,
+            card.service_unit_label,
+            card.base_price_fcfa,
+            card.base_duration_days,
+            card.base_duration_hours,
+            card.base_price_per_ha || null,
+          ]
+        );
+      }
+    } else if (pending.services && pending.services.length) {
+      const priceHa = pending.price || 0;
+      for (const svc of pending.services) {
+        await pool.query(
+          `INSERT INTO provider_services (provider_id, service_name, min_service_qty, service_unit, base_price_fcfa, base_price_per_ha)
+           VALUES ($1, $2, 1, 'hectare', $3, $4)`,
+          [providerId, svc, priceHa, priceHa]
+        );
+      }
+    }
     await updateSession(waPhone, {
       step: 'privacy_consent_new',
       user_type: 'unknown',
@@ -270,130 +298,40 @@ async function finalizeProviderRegistrationFromPendingGps(waPhone, pending, lat,
   }
 }
 
-async function findMatchingProviders(serviceType, farmerLat, farmerLng, preferredDate) {
-  const dateParam = preferredDate ? String(preferredDate).slice(0, 10) : null;
-  const r = await pool.query(
-    `SELECT p.id, p.full_name, p.phone, p.services_offered, p.base_price_per_ha, p.service_radius_km,
-            p.work_capacity_ha_per_hour, p.gps_lat, p.gps_lng,
-            (SELECT ROUND(AVG(fr.rating)::numeric, 1) FROM farmer_ratings fr WHERE fr.provider_id = p.id) AS avg_rating,
-            (
-              SELECT COALESCE(
-                JSON_AGG(JSON_BUILD_OBJECT('date', pas.available_date, 'start_time', pas.start_time, 'end_time', pas.end_time)
-                ORDER BY pas.available_date, pas.start_time),
-                '[]'::json
-              )
-              FROM provider_availability_slots pas
-              WHERE pas.provider_id = p.id
-                AND pas.is_booked = FALSE
-                AND ($2::date IS NULL OR pas.available_date BETWEEN ($2::date - INTERVAL '5 days') AND ($2::date + INTERVAL '5 days'))
-            ) AS availability_slots
-     FROM providers p
-     WHERE p.services_offered ILIKE $1
-     ORDER BY p.id ASC`,
-    ['%' + (serviceType || '').trim() + '%', dateParam]
-  );
-  let rows = r.rows;
-  if (farmerLat != null && farmerLng != null) {
-    rows = rows
-      .filter((pr) => {
-        const prLat = parseFloat(pr.gps_lat);
-        const prLng = parseFloat(pr.gps_lng);
-        if (isNaN(prLat) || isNaN(prLng)) return true;
-        const radius = parseFloat(pr.service_radius_km) || 999;
-        return haversineDistanceKm(farmerLat, farmerLng, prLat, prLng) <= radius;
-      })
-      .map((pr) => {
-        const prLat = parseFloat(pr.gps_lat);
-        const prLng = parseFloat(pr.gps_lng);
-        const dist = (prLat != null && !isNaN(prLat) && prLng != null && !isNaN(prLng))
-          ? haversineDistanceKm(farmerLat, farmerLng, prLat, prLng) : null;
-        return { ...pr, distance_km: dist };
-      })
-      .sort((a, b) => {
-        if (a.distance_km != null && b.distance_km != null && a.distance_km !== b.distance_km) {
-          return a.distance_km - b.distance_km;
-        }
-        if (a.distance_km != null && b.distance_km == null) return -1;
-        if (b.distance_km != null && a.distance_km == null) return 1;
-        const pa = parseFloat(a.base_price_per_ha) || 0;
-        const pb = parseFloat(b.base_price_per_ha) || 0;
-        if (pa !== pb) return pa - pb;
-        return (parseFloat(b.avg_rating) || 0) - (parseFloat(a.avg_rating) || 0);
-      });
+async function applyServiceRequestGpsFromWeb(waPhone, lat, lng) {
+  const latN = parseFloat(lat);
+  const lngN = parseFloat(lng);
+  if (Number.isNaN(latN) || Number.isNaN(lngN) || latN < -90 || latN > 90 || lngN < -180 || lngN > 180) {
+    return { ok: false, error: 'invalid_coords' };
   }
-  return rows.slice(0, 10);
-}
+  const phone = normalizePhone(waPhone);
+  const existing = await findExistingUser(phone);
+  if (!existing || existing.type !== 'farmer') {
+    return { ok: false, error: 'bad_user' };
+  }
 
-async function createBookingAndNotify(waFrom, existing, provider, data) {
+  const session = await getSession(waPhone);
+  const data = parseSessionData(session.data);
+  if (session.step === 'request_choose_provider' || session.step === 'request_choose_slot') {
+    return { ok: true, already_completed: true };
+  }
+  if (session.step !== 'request_await_gps_web' || !data.request_pending) {
+    return { ok: false, error: 'bad_step' };
+  }
+
   try {
-    const services = (data.request_pending && Array.isArray(data.request_pending.service_types) && data.request_pending.service_types.length)
-      ? data.request_pending.service_types
-      : [data.service_type];
-    const created = [];
-    let totalCost = 0;
-    for (const svc of services) {
-      const economics = calculateBookingEconomics({
-        providerBasePricePerHa: provider.base_price_per_ha,
-        farmSizeHa: data.farm_size_ha,
-      });
-      const ins = await pool.query(
-        `INSERT INTO bookings (
-           farmer_id, provider_id, service_type, status, scheduled_date, scheduled_time, farm_size_ha,
-           budget_min_fcfa, budget_max_fcfa, provider_base_amount_fcfa, platform_fee_amount_fcfa, farmer_payable_amount_fcfa, payment_status
-         )
-         VALUES ($1, $2, $3, 'pending', $4, $5, $6, $7, $8, $9, $10, $11, 'held') RETURNING id`,
-        [
-          existing.id,
-          provider.id,
-          svc,
-          data.scheduled_date || null,
-          data.scheduled_time || null,
-          data.farm_size_ha,
-          data.budget_min_fcfa || null,
-          data.budget_max_fcfa || null,
-          economics.providerBaseAmount,
-          economics.platformFeeAmount,
-          economics.farmerPayableAmount,
-        ]
-      );
-      const bookingIdLoop = ins.rows[0].id;
-      created.push({ id: bookingIdLoop, service: svc, payout: economics.providerBaseAmount });
-      totalCost += Math.round((parseFloat(provider.base_price_per_ha) || 0) * (data.farm_size_ha || 0) * (1 + PLATFORM_COMMISSION_RATE));
-
-      try {
-        const priceHa = parseFloat(provider.base_price_per_ha) || 0;
-        const farmSize = data.farm_size_ha || 0;
-        await sendBotReply(
-          provider.phone,
-          buildOptionListReply(
-            `*New request #${bookingIdLoop}*\n\n` +
-              `Service: ${svc}\n` +
-              `Farm size: ${farmSize} ha\n` +
-              `Date/Time: ${data.scheduled_date || 'TBD'} ${data.scheduled_time || ''}\n` +
-              `Distance: ${provider.distance_km != null ? provider.distance_km.toFixed(1) + ' km' : '—'}\n` +
-              `Expected payout: ${Math.round(priceHa * farmSize).toLocaleString()} FCFA`,
-            [
-              { id: `accept_${bookingIdLoop}`, title: 'Accept', description: 'Confirm this booking' },
-              { id: `reject_${bookingIdLoop}`, title: 'Reject', description: 'Decline this booking' },
-            ]
-          )
-        );
-      } catch (e) {
-        console.error('WhatsApp notify provider failed:', e);
-      }
-    }
-
-    await updateSession(waFrom, { step: 'main_menu', data: {} });
-
-    const plural = created.length > 1;
-    return `✅ *Request submitted!*\n\n` +
-      `Provider *${provider.full_name}* has been notified for ${created.length} service${plural ? 's' : ''}.\n` +
-      `Estimated Total (incl. platform fee): ${totalCost.toLocaleString()} FCFA\n\n` +
-      'Cancellation policy: free >=24h, 10% at 6-24h, 30% at <6h.\n\n' +
-      'Reply *MENU* for options.';
+    return await beginProviderSelection(
+      waPhone,
+      existing,
+      latN,
+      lngN,
+      data.request_pending,
+      { rejected_provider_ids: data.rejected_provider_ids || [] },
+      updateSession
+    );
   } catch (err) {
-    console.error('Booking create error:', err);
-    return 'Sorry, the request could not be submitted. Please try again.';
+    console.error('applyServiceRequestGpsFromWeb:', err);
+    return { ok: false, error: 'match_failed' };
   }
 }
 
@@ -664,26 +602,6 @@ async function getFarmerFarms(farmerId) {
   }];
 }
 
-function buildProviderChoiceListReply(providers, farmSizeHa) {
-  const rows = (providers || []).map((p, i) => {
-    const priceHa = parseFloat(p.base_price_per_ha) || 0;
-    const estTotal = Math.round(priceHa * (farmSizeHa || 0) * (1 + PLATFORM_COMMISSION_RATE));
-    const distStr = p.distance_km != null ? `${p.distance_km.toFixed(1)} km` : '—';
-    const ratingStr = p.avg_rating != null ? `⭐ ${p.avg_rating}` : '';
-    const slotSummary = Array.isArray(p.availability_slots) && p.availability_slots.length > 0
-      ? `${p.availability_slots[0].date}..${p.availability_slots[p.availability_slots.length - 1].date}`
-      : 'No slots';
-    const bits = [`${estTotal.toLocaleString()} FCFA`, distStr, slotSummary];
-    if (ratingStr) bits.push(ratingStr);
-    return {
-      id: `prov_${i + 1}`,
-      title: String(p.full_name || `Provider ${i + 1}`).slice(0, 24),
-      description: bits.join(' · ').slice(0, 72),
-    };
-  });
-  return buildOptionListReply('Available providers near your farm. Select one to continue.', rows);
-}
-
 function getRequestSelectFarmMessage(farms) {
   const rows = farms.map((farm, i) => {
     const loc = farm.location || farm.plot_name || '—';
@@ -711,6 +629,8 @@ async function handleIncoming(waFrom, body, latitude, longitude, profileName) {
       (session.step.startsWith('farmer_') ||
         session.step.startsWith('provider_') ||
         session.step.startsWith('request_') ||
+        session.step === 'request_choose_provider' ||
+        session.step === 'request_choose_slot' ||
         session.step.startsWith('match_') ||
         session.step.startsWith('farmer_escrow') ||
         session.step === 'confirm_job_select' ||
@@ -778,8 +698,12 @@ async function handleIncoming(waFrom, body, latitude, longitude, profileName) {
   if (session.step === 'confirm_job_confirm' && existing?.type === 'farmer') {
     return handleConfirmJobConfirm(waFrom, existing, text, data);
   }
-  if (session.step === 'provider_match_payout_method' && existing?.type === 'provider') {
-    return handleProviderMatchPayoutMethod(waFrom, existing, text, data);
+
+  if (session.step === 'rating_select' && existing?.type === 'farmer') {
+    return handleRatingSelect(waFrom, existing, text, data);
+  }
+  if (session.step === 'rating_score' && existing?.type === 'farmer') {
+    return handleRatingScore(waFrom, existing, text, data);
   }
 
   if (session.step === 'add_farm_details' && existing && existing.type === 'farmer') {
@@ -945,10 +869,8 @@ async function handleIncoming(waFrom, body, latitude, longitude, profileName) {
     return handleRequestFlow(waFrom, session, data, text, latitude, longitude, existing);
   }
 
-  // Provider accept/reject
+  // Provider accept/reject booking requests
   if (existing?.type === 'provider') {
-    const acceptMatch = text.match(/^1\s*$/);
-    const rejectMatch = text.match(/^2\s*$/);
     const jobMatch = text.match(/^accept\s*(\d+)$/i) || text.match(/^reject\s*(\d+)$/i);
     if (jobMatch) {
       const id = parseInt(jobMatch[1], 10);
@@ -956,6 +878,10 @@ async function handleIncoming(waFrom, body, latitude, longitude, profileName) {
         ? handleProviderAcceptJob(waFrom, existing, id)
         : handleProviderRejectJob(waFrom, existing, id);
     }
+  }
+
+  if (textLower === 'rate' && existing?.type === 'farmer') {
+    return handleRateMenu(waFrom, existing);
   }
 
   return getMainMenu(existing);
@@ -986,136 +912,6 @@ function parseKeyValueBlock(text) {
     result[key] = value;
   }
   return result;
-}
-
-async function applyServiceRequestGpsFromWeb(waPhone, lat, lng) {
-  const latN = parseFloat(lat);
-  const lngN = parseFloat(lng);
-  if (Number.isNaN(latN) || Number.isNaN(lngN) || latN < -90 || latN > 90 || lngN < -180 || lngN > 180) {
-    return { ok: false, error: 'invalid_coords' };
-  }
-  const phone = normalizePhone(waPhone);
-  const digits = phoneDigits(phone);
-
-  const existing = await findExistingUser(phone);
-  if (!existing || existing.type !== 'farmer') {
-    return { ok: false, error: 'bad_user' };
-  }
-
-  const client = await pool.connect();
-  let session;
-  let data;
-  let serviceType;
-  let farmSizeNum;
-  let providers;
-  let requestPending;
-  let bestMatch;
-
-  try {
-    await client.query('BEGIN');
-    const sr = await client.query(
-      `SELECT * FROM whatsapp_sessions WHERE wa_phone = $1 FOR UPDATE`,
-      [phone]
-    );
-    session = sr.rows[0];
-    if (!session) {
-      await client.query('ROLLBACK');
-      return { ok: false, error: 'bad_step' };
-    }
-    data = parseSessionData(session.data);
-    if (session.step === 'request_choose_provider') {
-      await client.query('ROLLBACK');
-      return { ok: true, already_completed: true };
-    }
-    if (session.step === 'match_escrow_decision') {
-      await client.query('ROLLBACK');
-      return { ok: true, already_completed: true };
-    }
-    if (session.step !== 'request_await_gps_web' || !data.request_pending) {
-      await client.query('ROLLBACK');
-      return { ok: false, error: 'bad_step' };
-    }
-
-    const rp = data.request_pending;
-    requestPending = rp;
-    serviceType = rp.service_type;
-    farmSizeNum = parseFloat(rp.farm_size_ha);
-    providers = await findMatchingProviders(serviceType, latN, lngN, rp.scheduled_date);
-
-    if (providers.length === 0) {
-      await client.query(
-        `INSERT INTO bookings (
-          farmer_id, provider_id, service_type, status, farm_size_ha, scheduled_date, scheduled_time, budget_min_fcfa, budget_max_fcfa
-        ) VALUES ($1, NULL, $2, 'pending', $3, $4, $5, $6, $7) RETURNING id`,
-        [existing.id, serviceType, farmSizeNum, rp.scheduled_date || null, rp.scheduled_time || null, rp.budget_min_fcfa || null, rp.budget_max_fcfa || null]
-      );
-      await client.query(
-        `UPDATE whatsapp_sessions SET step = $2, data = $3::jsonb, updated_at = CURRENT_TIMESTAMP WHERE wa_phone = $1`,
-        [phone, 'main_menu', '{}']
-      );
-      await client.query('COMMIT');
-      try {
-        await sendBrandedText(
-          `whatsapp:${digits}`,
-          '\u2705 *Request received!* No providers matched. Admin will assign one soon. Reply *MENU* for options.'
-        );
-      } catch (err) {
-        console.error('applyServiceRequestGpsFromWeb no-match notify:', err);
-      }
-      return { ok: true, no_match: true };
-    }
-
-    bestMatch = pickBestProvider(providers, farmSizeNum, rp.budget_min_fcfa, rp.budget_max_fcfa);
-    if (!bestMatch) {
-      await client.query(
-        `INSERT INTO bookings (
-          farmer_id, provider_id, service_type, status, farm_size_ha, scheduled_date, scheduled_time, budget_min_fcfa, budget_max_fcfa
-        ) VALUES ($1, NULL, $2, 'pending', $3, $4, $5, $6, $7) RETURNING id`,
-        [existing.id, serviceType, farmSizeNum, rp.scheduled_date || null, rp.scheduled_time || null, rp.budget_min_fcfa || null, rp.budget_max_fcfa || null]
-      );
-      await client.query(
-        `UPDATE whatsapp_sessions SET step = $2, data = $3::jsonb, updated_at = CURRENT_TIMESTAMP WHERE wa_phone = $1`,
-        [phone, 'main_menu', '{}']
-      );
-      await client.query('COMMIT');
-      try {
-        await sendBrandedText(
-          `whatsapp:${digits}`,
-          'Request received. No provider matched your budget and availability. Admin will assign one soon. Reply *MENU* for options.'
-        );
-      } catch (err) {
-        console.error('applyServiceRequestGpsFromWeb no-match notify:', err);
-      }
-      return { ok: true, no_match: true };
-    }
-
-    await client.query(
-      `UPDATE whatsapp_sessions SET step = $2, data = $3::jsonb, updated_at = CURRENT_TIMESTAMP WHERE wa_phone = $1`,
-      [phone, 'main_menu', '{}']
-    );
-    await client.query('COMMIT');
-  } catch (err) {
-    await client.query('ROLLBACK').catch(() => {});
-    console.error('applyServiceRequestGpsFromWeb transaction:', err);
-    return { ok: false, error: 'db' };
-  } finally {
-    client.release();
-  }
-
-  try {
-    await initiateAutoMatch(`whatsapp:${digits}`, existing, bestMatch.provider, {
-      service_type: serviceType,
-      farm_size_ha: farmSizeNum,
-      scheduled_date: requestPending.scheduled_date || null,
-      scheduled_time: requestPending.scheduled_time || null,
-      budget_min_fcfa: requestPending.budget_min_fcfa || null,
-      budget_max_fcfa: requestPending.budget_max_fcfa || null,
-    });
-  } catch (err) {
-    console.error('applyServiceRequestGpsFromWeb auto-match:', err);
-    return { ok: false, error: 'match_failed' };
-  }
-  return { ok: true, matched: true };
 }
 
 async function handleFarmerFlow(waFrom, session, data, text, latitude, longitude) {
@@ -1277,9 +1073,7 @@ function getProviderBatchedMessage() {
   return (
     'Register as a Service Provider:\n\n' +
     'Name:\n' +
-    'Service Radius (km):\n' +
-    'Price per hectare (FCFA):\n' +
-    'Work capacity (ha/day):\n\n' +
+    'Service Radius (km):\n\n' +
     'Select services offered (comma separated numbers):\n\n' +
     '1. Ploughing\n' +
     '2. Planting\n' +
@@ -1293,11 +1087,73 @@ function getProviderBatchedMessage() {
     '*Example:*\n' +
     'Name: John\n' +
     'Radius: 10\n' +
-    'Price: 12000\n' +
-    'Capacity: 3\n' +
     'Services: 1,5\n\n' +
-    'After you send this, you will get a *link* to set your base location on the map.'
+    'Next you will define price, minimum quantity, and duration per service.'
   );
+}
+
+function getProviderRateCardsMessage(serviceNames) {
+  return (
+    'Define your *service rate cards* (one block per service).\n\n' +
+    `Configure: ${serviceNames.join(', ')}\n\n` +
+    '*Example for land clearing:*\n' +
+    'Service: Ploughing\n' +
+    'Min qty: 0.5\n' +
+    'Unit: hectare\n' +
+    'Price: 100000\n' +
+    'Duration days: 5\n\n' +
+    '*Example for transport:*\n' +
+    'Service: Transport\n' +
+    'Min qty: 20\n' +
+    'Unit: bag\n' +
+    'Price: 10000\n' +
+    'Duration hours: 3'
+  );
+}
+
+function parseProviderRateCards(text, expectedServices) {
+  const blocks = String(text || '').split(/(?=Service\s*:)/i).filter((b) => b.trim());
+  const cards = [];
+  for (const block of blocks) {
+    const kv = parseKeyValueBlock(block);
+    const serviceName =
+      (kv.service || '').trim() ||
+      block.replace(/^Service\s*:\s*/i, '').split('\n')[0].trim();
+    if (!serviceName) continue;
+    const minQty = parseFloat(kv.min_qty || kv.min_quantity || kv.qty || '1');
+    const unit = (kv.unit || 'hectare').trim().toLowerCase();
+    const price = parseFloat(kv.price || kv.base_price || '');
+    const days = parseFloat(kv.duration_days || kv.days || '');
+    const hours = parseFloat(kv.duration_hours || kv.hours || '');
+    if (Number.isNaN(price) || price < 0) continue;
+    cards.push({
+      service_name: serviceName,
+      min_service_qty: Number.isNaN(minQty) ? 1 : minQty,
+      service_unit: unit,
+      service_unit_label: unit,
+      base_price_fcfa: price,
+      base_duration_days: Number.isNaN(days) ? null : days,
+      base_duration_hours: Number.isNaN(hours) ? null : hours,
+      base_price_per_ha: unit.includes('hectare') || unit === 'ha' ? price / (minQty || 1) : null,
+    });
+  }
+  if (cards.length === 0 && expectedServices.length === 1) {
+    const kv = parseKeyValueBlock(text);
+    const price = parseFloat(kv.price || '');
+    if (!Number.isNaN(price)) {
+      cards.push({
+        service_name: expectedServices[0],
+        min_service_qty: 1,
+        service_unit: 'hectare',
+        service_unit_label: 'hectare',
+        base_price_fcfa: price,
+        base_duration_days: parseFloat(kv.duration_days || '') || null,
+        base_duration_hours: null,
+        base_price_per_ha: price,
+      });
+    }
+  }
+  return cards;
 }
 
 function getProviderAwaitGpsWebMessage(gpsUrl) {
@@ -1439,21 +1295,23 @@ async function handleRequestFlow(waFrom, session, data, text, latitude, longitud
       };
       const farmLat = data.farm_gps_lat != null ? parseFloat(data.farm_gps_lat) : NaN;
       const farmLng = data.farm_gps_lng != null ? parseFloat(data.farm_gps_lng) : NaN;
+      const fullPending = { ...data, request_pending: requestPending };
       if (hasUsableFarmGps(farmLat, farmLng)) {
-        await updateSession(waFrom, {
-          step: 'request_await_gps_web',
-          data: { request_pending: requestPending },
-        });
-        const r = await applyServiceRequestGpsFromWeb(phone, farmLat, farmLng);
-        if (r.ok) return null;
-        await updateSession(waFrom, {
-          step: 'request_schedule_budget',
-          data: { ...data, request_pending: requestPending },
-        });
-        if (r.error === 'send_failed') {
-          return 'We could not send the provider list. Reply *MENU* and try *3* again.';
+        try {
+          const r = await beginProviderSelection(
+            waFrom,
+            existing,
+            farmLat,
+            farmLng,
+            requestPending,
+            { rejected_provider_ids: data.rejected_provider_ids || [] },
+            updateSession
+          );
+          if (r.ok) return null;
+        } catch (err) {
+          console.error('beginProviderSelection:', err);
         }
-        return 'Something went wrong while matching providers. Reply *MENU* to try again.';
+        return 'Something went wrong while loading providers. Reply *MENU* to try again.';
       }
       const token = crypto.randomUUID();
       const gpsUrl = `${getFrontendBaseUrl()}/gps?t=${encodeURIComponent(token)}&purpose=request`;
@@ -1481,7 +1339,6 @@ async function handleRequestFlow(waFrom, session, data, text, latitude, longitud
           'Reply *MENU* to cancel.'
         );
       }
-      // Avoid spamming the same reminder on every stray message while the user opens the GPS page.
       const REMINDER_COOLDOWN_MS = 90_000;
       const last = typeof data._gps_link_reminder_at === 'number' ? data._gps_link_reminder_at : 0;
       const now = Date.now();
@@ -1495,6 +1352,54 @@ async function handleRequestFlow(waFrom, session, data, text, latitude, longitud
       return 'Open the GPS link we sent, then return here. Reply *1* to resend. Reply *MENU* to cancel.';
     }
 
+    case 'request_choose_provider': {
+      const m = String(text || '').trim().match(/^pick_prov_(\d+)$/i);
+      const providerId = m ? parseInt(m[1], 10) : NaN;
+      if (Number.isNaN(providerId)) {
+        const recs = (data.candidate_providers || []).slice(0, 10);
+        if (!recs.length) {
+          await updateSession(waFrom, { step: 'main_menu', data: {} });
+          return 'Session expired. Reply *MENU* and request service again.';
+        }
+        return buildOptionListReply(
+          'Select a provider from the list.',
+          recs.map((c) => ({
+            id: `pick_prov_${c.providerId}`,
+            title: String(c.name).slice(0, 24),
+            description: `${c.farmerPayable.toLocaleString()} FCFA`.slice(0, 72),
+          }))
+        );
+      }
+      const slotResult = await showSlotsForProvider(waFrom, data, providerId, updateSession);
+      if (!slotResult.ok) {
+        return slotResult.message || 'Could not load slots. Pick another provider or *MENU* to cancel.';
+      }
+      return slotResult.reply;
+    }
+
+    case 'request_choose_slot': {
+      const m = String(text || '').trim().match(/^slot_(\d+)$/i);
+      const slotId = m ? parseInt(m[1], 10) : NaN;
+      if (Number.isNaN(slotId)) {
+        const slots = data.available_slots || [];
+        if (!slots.length) {
+          await updateSession(waFrom, { step: 'main_menu', data: {} });
+          return 'Session expired. Reply *MENU* to try again.';
+        }
+        return buildOptionListReply(
+          'Select a time slot.',
+          slots.slice(0, 10).map((s) => ({
+            id: `slot_${s.id}`,
+            title: `${s.available_date} ${String(s.start_time).slice(0, 5)}`.slice(0, 24),
+            description: String(s.end_time).slice(0, 5),
+          }))
+        );
+      }
+      const fin = await finalizeSlotAndNotifyProvider(waFrom, existing, data, slotId, updateSession);
+      if (!fin.ok) return 'Could not create booking. Reply *MENU* to try again.';
+      return null;
+    }
+
     default:
       await updateSession(waFrom, { step: 'main_menu', data: {} });
       return getMainMenu();
@@ -1504,58 +1409,6 @@ async function handleRequestFlow(waFrom, session, data, text, latitude, longitud
 async function handleProviderFlow(waFrom, session, data, text, latitude, longitude) {
   const phone = normalizePhone(waFrom);
 
-  // Provider: handle payout method selection and payout number collection
-  if (session.step === 'provider_await_payout_method') {
-    const choice = String(text || '').trim();
-    let method = null;
-    if (choice === '1' || choice.toLowerCase().includes('mobile')) method = 'mobile_money';
-    else if (choice === '2' || choice.toLowerCase().includes('orange')) method = 'orange_money';
-    if (!method) {
-      return 'Reply with *1* for Mobile Money or *2* for Orange Money.';
-    }
-    const bookingId = data?.booking_id;
-    if (!bookingId) {
-      await updateSession(waFrom, { step: 'main_menu', data: {} });
-      return 'Booking context lost. Reply *MENU* for options.';
-    }
-    try {
-      await pool.query(
-        `INSERT INTO booking_payments (booking_id, escrow_amount_fcfa, provider_amount_fcfa, platform_fee_amount_fcfa, payment_status, payout_method, created_at, updated_at)
-         VALUES ($1, 0, 0, 0, 'held', $2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-         ON CONFLICT (booking_id) DO UPDATE SET payout_method = EXCLUDED.payout_method, updated_at = CURRENT_TIMESTAMP`,
-        [bookingId, method]
-      );
-      await updateSession(waFrom, { step: 'provider_await_payout_number', data: { booking_id: bookingId, payout_method: method } });
-      return 'Please send the payout number (include country code). Example: +2376xxxxxxx';
-    } catch (err) {
-      console.error('Error saving payout method:', err.message);
-      await updateSession(waFrom, { step: 'main_menu', data: {} });
-      return 'Sorry, we could not save your payout method. Please try again later.';
-    }
-  }
-
-  if (session.step === 'provider_await_payout_number') {
-    const bookingId = data?.booking_id;
-    const method = data?.payout_method || 'mobile_money';
-    const number = String(text || '').trim();
-    const digits = phoneDigits(number);
-    if (!digits || digits.length < 6) return 'Please send a valid phone number including country code. Example: +2376xxxxxxx';
-    try {
-      await pool.query(
-        `INSERT INTO booking_payments (booking_id, escrow_amount_fcfa, provider_amount_fcfa, platform_fee_amount_fcfa, payment_status, payout_method, payout_reference, created_at, updated_at)
-         VALUES ($1, 0, 0, 0, 'held', $2, $3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-         ON CONFLICT (booking_id) DO UPDATE SET payout_method = COALESCE(EXCLUDED.payout_method, booking_payments.payout_method), payout_reference = EXCLUDED.payout_reference, updated_at = CURRENT_TIMESTAMP`,
-        [bookingId, method, digits]
-      );
-      await updateSession(waFrom, { step: 'main_menu', data: {} });
-      return `Thanks — payout method saved as ${method.replace('_', ' ')} and number ${digits}. Admin will use this to process payment.`;
-    } catch (err) {
-      console.error('Error saving payout number:', err.message);
-      await updateSession(waFrom, { step: 'main_menu', data: {} });
-      return 'Sorry, we could not save your payout number. Please try again later.';
-    }
-  }
-
   if (session.step === 'provider_batched') {
     const kv = parseKeyValueBlock(text);
     const name = kv.name || kv.full_name;
@@ -1563,35 +1416,58 @@ async function handleProviderFlow(waFrom, session, data, text, latitude, longitu
     const radius = parseFloat(
       kv.radius || kv.service_radius || kv.service_radius_km || kv['service_radius_(km)'] || ''
     );
-    const price = parseFloat(
-      kv.price || kv.price_per_hectare || kv['price_per_hectare_(fcfa)'] || ''
-    );
-    const capacity = parseFloat(
-      kv.capacity || kv.work_capacity || kv['work_capacity_(ha/day)'] || ''
-    );
-    if (isNaN(radius) || radius < 0) return 'Please include *Radius:* (km). Example: Radius: 10\n\n' + getProviderBatchedMessage();
-    if (isNaN(price) || price < 0) return 'Please include *Price:* (FCFA/ha). Example: Price: 12000\n\n' + getProviderBatchedMessage();
-    if (isNaN(capacity) || capacity < 0) return 'Please include *Capacity:* (ha/day). Example: Capacity: 3\n\n' + getProviderBatchedMessage();
-    const serviceNums = (kv.services || '').replace(/[^\d,]/g, '').split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => !isNaN(n) && n >= 1 && n <= 9);
+    if (isNaN(radius) || radius < 0) {
+      return 'Please include *Radius:* (km). Example: Radius: 10\n\n' + getProviderBatchedMessage();
+    }
+    const serviceNums = (kv.services || '')
+      .replace(/[^\d,]/g, '')
+      .split(',')
+      .map((s) => parseInt(s.trim(), 10))
+      .filter((n) => !isNaN(n) && n >= 1 && n <= SERVICE_LIST.length);
     const services = serviceNums.map((n) => SERVICE_LIST[n - 1]).filter(Boolean);
+    const serviceList = services.length ? services : ['General'];
+    await updateSession(waFrom, {
+      step: 'provider_rate_cards',
+      user_type: 'provider',
+      data: {
+        pending_provider: {
+          name,
+          radius,
+          services: serviceList,
+          serviceNums,
+        },
+      },
+    });
+    return getProviderRateCardsMessage(serviceList);
+  }
+
+  if (session.step === 'provider_rate_cards') {
+    const pending = data.pending_provider;
+    if (!pending?.name) {
+      await updateSession(waFrom, { step: 'main_menu', data: {} });
+      return getMainMenu(await findExistingUser(phone));
+    }
+    const rateCards = parseProviderRateCards(text, pending.services || []);
+    if (!rateCards.length) {
+      return 'Could not parse rate cards. Please follow the format.\n\n' + getProviderRateCardsMessage(pending.services);
+    }
     const token = crypto.randomUUID();
     const gpsUrl = `${getFrontendBaseUrl()}/gps?t=${encodeURIComponent(token)}&role=provider`;
+    const firstHa = rateCards.find((c) => c.base_price_per_ha)?.base_price_per_ha || 0;
     await updateSession(waFrom, {
       step: 'provider_await_gps_web',
       user_type: 'provider',
       data: {
         gps_token: token,
         pending_provider: {
-          name,
-          radius,
-          price,
-          capacity,
-          services: services.length ? services : ['General'],
-          serviceNums,
+          ...pending,
+          rateCards,
+          price: firstHa,
+          capacity: 3,
         },
       },
     });
-    return 'Profile received.\n\n' + getProviderAwaitGpsWebMessage(gpsUrl);
+    return 'Rate cards saved.\n\n' + getProviderAwaitGpsWebMessage(gpsUrl);
   }
 
   if (session.step === 'provider_await_gps_web') {
@@ -1907,7 +1783,7 @@ async function handleMyRequests(waFrom, existing) {
       `SELECT b.id, b.service_type, b.farm_size_ha, b.status, f.full_name AS farmer_name
        FROM bookings b
        JOIN farmers f ON b.farmer_id = f.id
-       WHERE b.provider_id = $1 AND b.status IN ('pending', 'confirmed')
+       WHERE b.provider_id = $1 AND b.status IN ('awaiting_provider_accept', 'matched', 'confirmed', 'in_progress')
        ORDER BY b.scheduled_date ASC NULLS LAST`,
       [existing.id]
     );
@@ -1947,7 +1823,7 @@ async function handleConfirmJobSelect(waFrom, existing, text, data) {
     `SELECT b.id, b.service_type, b.farmer_payable_amount_fcfa, p.full_name AS provider_name
      FROM bookings b
      LEFT JOIN providers p ON b.provider_id = p.id
-     WHERE b.id = $1 AND b.farmer_id = $2 AND b.status = 'confirmed' AND b.payment_status = 'held'`,
+     WHERE b.id = $1 AND b.farmer_id = $2 AND b.status = 'awaiting_farmer_confirmation' AND b.payment_status = 'held'`,
     [bookingId, existing.id]
   );
   if (br.rows.length === 0) {
@@ -2067,28 +1943,6 @@ async function handleFarmerEscrowConfirm(waFrom, existing, text, data) {
   }
 }
 
-async function handleProviderMatchPayoutMethod(waFrom, existing, text, data) {
-  const method = normalizePayoutMethod(text);
-  if (!method) {
-    return 'Reply *1* for MoMo or *0* for Orange Money.';
-  }
-  const bookingId = data?.booking_id;
-  if (!bookingId) {
-    await updateSession(waFrom, { step: 'main_menu', data: {} });
-    return 'Session expired. Reply *MENU* for options.';
-  }
-  try {
-    await saveProviderPayoutMethod(bookingId, existing.id, method);
-    await updateSession(waFrom, { step: 'main_menu', data: {} });
-    const label = method === 'orange_money' ? 'Orange Money' : 'MoMo';
-    return `Your payout method (${label}) has been saved. You will be paid when the farmer confirms the job is complete. Reply *MENU* for options.`;
-  } catch (err) {
-    console.error('handleProviderMatchPayoutMethod:', err.message);
-    await updateSession(waFrom, { step: 'main_menu', data: {} });
-    return 'We could not save your payout method. Reply *MENU* to try again.';
-  }
-}
-
 async function handleFarmerConfirmationsFlow(waFrom, existing, text, data) {
   const t = String(text || '').trim();
   // Expect interactive id like 'confirm_<bookingId>'
@@ -2122,9 +1976,9 @@ async function handleFarmerConfirmationsFlow(waFrom, existing, text, data) {
       await updateSession(waFrom, { step: 'main_menu', data: {} });
       return 'This booking does not belong to you. Reply *MENU* for options.';
     }
-    if (b.status !== 'confirmed') {
+    if (b.status !== 'awaiting_farmer_confirmation') {
       await updateSession(waFrom, { step: 'main_menu', data: {} });
-      return `Booking is in status '${b.status}' and cannot be confirmed yet.`;
+      return `Booking is in status '${b.status}' and cannot be confirmed yet. Use *Confirm Job* when the provider has ended the job.`;
     }
 
     try {
@@ -2145,59 +1999,122 @@ async function handleFarmerConfirmationsFlow(waFrom, existing, text, data) {
 
 async function handleProviderAcceptJob(waFrom, existing, bookingId) {
   try {
-    const r = await pool.query(
-      `UPDATE bookings SET status = 'confirmed', updated_at = CURRENT_TIMESTAMP
-       WHERE id = $1 AND provider_id = $2 AND status = 'pending'
-       RETURNING *,
-         (SELECT phone FROM farmers WHERE id = bookings.farmer_id) AS farmer_phone,
-         (SELECT location FROM farmers WHERE id = bookings.farmer_id) AS farm_location`,
-      [bookingId, existing.id]
-    );
-    if (r.rows.length === 0) return 'Job not found. Reply *4* for your jobs.';
-    const b = r.rows[0];
-    try {
-      await sendBrandedText(b.farmer_phone, `✅ *Booking confirmed!*\n\nProvider *${existing.name}* has accepted your request.\nService: ${b.service_type}\n\nReply *MENU* for options.`);
-    } catch (e) {
-      console.error('WhatsApp notify farmer failed:', e);
-    }
-    // Do not request payout details via WhatsApp. Provider will receive a secure portal link after farmer confirmation.
+    const result = await providerAcceptBooking(bookingId, existing.id);
+    if (!result.ok) return 'Booking not found or already handled. Reply *4* for your jobs.';
     return (
-      '✅ Job accepted.\n\n' +
-      '*Provider confirmation terms:*\n' +
-      `Service: ${b.service_type || '—'}\n` +
-      `Amount secured in escrow: ${(b.farmer_payable_amount_fcfa || 0).toLocaleString()} FCFA\n` +
-      `Date/Time: ${b.scheduled_date || 'TBD'} ${b.scheduled_time || ''}\n` +
-      `Farm location: ${b.farm_location || 'Shared in booking details'}\n\n` +
-      'Payment is released only after farmer confirms 100% completion. Partial jobs are not eligible for payout. ' +
-      'If service is abandoned or disputed, payment remains on hold during investigation.\n\n' +
-      'You will receive a secure link to submit your payout details after the farmer confirms completion.\n\n' +
+      '✅ Booking accepted. The farmer will pay to escrow next.\n\n' +
+      'Payment is released only after the farmer confirms 100% completion.\n\n' +
       'Reply *MENU* for options.'
     );
   } catch (err) {
+    console.error('handleProviderAcceptJob:', err.message);
     return 'Something went wrong. Reply *4* to try again.';
   }
 }
 
 async function handleProviderRejectJob(waFrom, existing, bookingId) {
   try {
-    const r = await pool.query(
-      `UPDATE bookings SET status = 'rejected', updated_at = CURRENT_TIMESTAMP
-       WHERE id = $1 AND provider_id = $2 AND status = 'pending'
-       RETURNING id, (SELECT phone FROM farmers WHERE id = bookings.farmer_id) AS farmer_phone`,
-      [bookingId, existing.id]
+    const result = await providerRejectBooking(bookingId, existing.id);
+    if (!result.ok) return 'Booking not found or already handled. Reply *4* for your jobs.';
+    const booking = result.booking;
+    const farmerRow = await pool.query(
+      `SELECT f.id, f.phone, f.gps_lat, f.gps_lng FROM farmers f WHERE f.id = $1`,
+      [booking.farmer_id]
     );
-    if (r.rows.length === 0) return 'Job not found. Reply *4* for your jobs.';
-    const farmerPhone = r.rows[0].farmer_phone;
-    if (farmerPhone) {
-      await sendBrandedText(
-        farmerPhone,
-        '⚠️ Your selected provider declined the booking. Please open *Request Service* again to choose another available provider.'
-      ).catch((e) => console.error('Reject notify farmer failed:', e.message));
+    if (farmerRow.rows.length > 0) {
+      const f = farmerRow.rows[0];
+      const lat = parseFloat(f.gps_lat);
+      const lng = parseFloat(f.gps_lng);
+      const requestPending = {
+        farmer_id: booking.farmer_id,
+        service_type: booking.service_type,
+        farm_size_ha: booking.farm_size_ha,
+        scheduled_date: booking.scheduled_date,
+        scheduled_time: booking.scheduled_time,
+        budget_min_fcfa: booking.budget_min_fcfa,
+        budget_max_fcfa: booking.budget_max_fcfa,
+      };
+      if (!Number.isNaN(lat) && !Number.isNaN(lng)) {
+        await reofferAfterProviderReject(
+          f.phone,
+          { id: f.id, name: 'Farmer' },
+          requestPending,
+          lat,
+          lng,
+          [existing.id],
+          updateSession
+        );
+      } else {
+        await sendBrandedText(
+          f.phone,
+          '⚠️ Your provider declined. Reply *3* (Request Service) to choose another provider.'
+        );
+      }
     }
-    return 'Job declined. Reply *4* for other jobs.';
+    return 'Job declined. Reply *MENU* for options.';
   } catch (err) {
+    console.error('handleProviderRejectJob:', err.message);
     return 'Something went wrong. Reply *4* to try again.';
   }
+}
+
+async function handleRateMenu(waFrom, existing) {
+  const r = await pool.query(
+    `SELECT b.id, b.service_type, p.full_name AS provider_name
+     FROM bookings b
+     JOIN providers p ON b.provider_id = p.id
+     LEFT JOIN farmer_ratings fr ON fr.booking_id = b.id
+     WHERE b.farmer_id = $1 AND b.status = 'completed' AND fr.id IS NULL
+     ORDER BY b.updated_at DESC LIMIT 10`,
+    [existing.id]
+  );
+  if (r.rows.length === 0) {
+    return 'No completed services waiting for a rating. Reply *MENU* for options.';
+  }
+  const rows = r.rows.map((b) => ({
+    id: `rate_${b.id}`,
+    title: String(b.service_type).slice(0, 24),
+    description: String(b.provider_name || 'Provider').slice(0, 72),
+  }));
+  await updateSession(waFrom, { step: 'rating_select', data: { farmer_id: existing.id } });
+  return buildOptionListReply('Select a service to rate (1–5 stars):', rows);
+}
+
+async function handleRatingSelect(waFrom, existing, text, data) {
+  const m = String(text || '').trim().match(/^rate_(\d+)$/i);
+  const bookingId = m ? parseInt(m[1], 10) : NaN;
+  if (Number.isNaN(bookingId)) return handleRateMenu(waFrom, existing);
+  await updateSession(waFrom, { step: 'rating_score', data: { ...data, rating_booking_id: bookingId } });
+  return 'Reply with a rating from *1* to *5* stars.';
+}
+
+async function handleRatingScore(waFrom, existing, text, data) {
+  const score = parseInt(String(text || '').trim(), 10);
+  if (Number.isNaN(score) || score < 1 || score > 5) {
+    return 'Please reply with a number from 1 to 5.';
+  }
+  const bookingId = data.rating_booking_id;
+  const br = await pool.query(
+    `SELECT b.id, b.provider_id, b.farmer_id FROM bookings b
+     WHERE b.id = $1 AND b.farmer_id = $2 AND b.status = 'completed'`,
+    [bookingId, existing.id]
+  );
+  if (br.rows.length === 0) {
+    await updateSession(waFrom, { step: 'main_menu', data: {} });
+    return 'Booking not found. Reply *MENU* for options.';
+  }
+  const b = br.rows[0];
+  try {
+    await pool.query(
+      `INSERT INTO farmer_ratings (booking_id, farmer_id, provider_id, rating, created_at)
+       VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)`,
+      [bookingId, b.farmer_id, b.provider_id, score]
+    );
+  } catch (err) {
+    console.error('handleRatingScore insert:', err.message);
+  }
+  await updateSession(waFrom, { step: 'main_menu', data: {} });
+  return `Thank you! You rated this service *${score}/5*. Reply *MENU* for options.`;
 }
 
 module.exports = {
