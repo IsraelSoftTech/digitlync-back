@@ -94,6 +94,11 @@ function normalizeUserChoice(raw) {
   const rejectM = t.match(/^reject_(\d+)$/i);
   if (rejectM) return `reject ${rejectM[1]}`;
 
+  const jobCmdM = t.match(/^(start|end|pause|resume)_(\d+)$/i);
+  if (jobCmdM) return `${jobCmdM[1].toLowerCase()} ${jobCmdM[2]}`;
+
+  if (lower === 'decline') return 'reject';
+
   return t;
 }
 

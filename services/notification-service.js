@@ -56,11 +56,11 @@ Your payment has been secured by Digilync. Provider will confirm job start.`;
  * Shows service terms + payment expectations + full completion requirement
  */
 async function sendBookingConfirmationToProvider(bookingId, farmer, provider, booking) {
-  const message = `New Booking Request! 🚜
+  const message = `Booking Confirmed! ✅
 
 Service: ${booking.service_type || 'Agricultural Service'}
 Farmer: ${farmer.full_name}
-Farm Location: ${farmer.village}, ${farmer.district}
+Farm Location: ${farmer.village || '—'}, ${farmer.district || '—'}
 Scheduled: ${booking.scheduled_date} at ${booking.scheduled_time}
 Farm Size: ${booking.farm_size_ha} ha
 
@@ -74,10 +74,13 @@ Status: Payment HELD in Digilync escrow
 • Incomplete work may result in dispute
 • Reliability affects your future recommendations
 
-✅ To accept, reply with "ACCEPT"
-❌ To decline, reply with "DECLINE"
+🚜 On service day, reply:
+*START ${bookingId}* — when you begin work
+*END ${bookingId}* — when the job is 100% complete
 
-Use the job dashboard to Start / End the job on service day.`;
+Optional: *PAUSE ${bookingId}* / *RESUME ${bookingId}* during work.
+
+Reply *4* (My Jobs) anytime to see active bookings.`;
 
   try {
     await sendBrandedText(provider.phone, message);

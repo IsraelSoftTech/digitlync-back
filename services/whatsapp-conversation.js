@@ -13,9 +13,7 @@ const {
 } = require('./whatsapp-interactive');
 const { validateSchedulingWindow } = require('./operational-core');
 const {
-  beginProviderSelection,
-  showSlotsForProvider,
-  finalizeSlotAndNotifyProvider,
+  autoMatchServiceRequest,
   reofferAfterProviderReject,
 } = require('./booking-request-whatsapp');
 const {
@@ -27,6 +25,7 @@ const {
   providerAcceptBooking,
   providerRejectBooking,
 } = require('./matching-flow');
+const { recordProviderJobEvent, providerJobErrorMessage } = require('./provider-job-flow');
 
 const SERVICE_LIST = [
   'Ploughing', 'Planting', 'Spraying', 'Irrigation', 'Harvesting',
@@ -312,7 +311,7 @@ async function applyServiceRequestGpsFromWeb(waPhone, lat, lng) {
 
   const session = await getSession(waPhone);
   const data = parseSessionData(session.data);
-  if (session.step === 'request_choose_provider' || session.step === 'request_choose_slot') {
+  if (session.step === 'request_await_gps_web' || session.step === 'main_menu') {
     return { ok: true, already_completed: true };
   }
   if (session.step !== 'request_await_gps_web' || !data.request_pending) {
@@ -320,7 +319,7 @@ async function applyServiceRequestGpsFromWeb(waPhone, lat, lng) {
   }
 
   try {
-    return await beginProviderSelection(
+    return await autoMatchServiceRequest(
       waPhone,
       existing,
       latN,
@@ -492,7 +491,7 @@ function getHelpMessage(existing = null) {
     '\u{1F4D8} *Help*\n\n' +
     '• *1 Farmer* — Register your farm with a GPS link\n' +
     '• *2 Provider* — Register your services and base location\n' +
-    '• *3 Request* — Request a farm service (auto-matched to a provider)\n';
+    '• *3 Request* — Request one or more services (auto-matched to providers)\n';
   if (isFarmer) {
     msg +=
       '• *4 Confirm Job* — Confirm completed work and release payment\n' +
@@ -502,7 +501,8 @@ function getHelpMessage(existing = null) {
       '• *8 Recap* — View your profile and farms\n\n';
   } else {
     msg +=
-      '• *4 My Requests* — View your bookings or jobs\n' +
+      '• *4 My Jobs* — View bookings; *ACCEPT/REJECT* new requests\n' +
+      '• *START <id>* / *END <id>* — Start or finish a confirmed job\n' +
       '• *5* — This help\n' +
       '• *6 Unsubscribe* — Remove your account\n' +
       '• *7 Recap* — View your profile\n\n';
@@ -869,14 +869,54 @@ async function handleIncoming(waFrom, body, latitude, longitude, profileName) {
     return handleRequestFlow(waFrom, session, data, text, latitude, longitude, existing);
   }
 
-  // Provider accept/reject booking requests
+  // Provider accept/reject booking requests + job lifecycle commands
   if (existing?.type === 'provider') {
-    const jobMatch = text.match(/^accept\s*(\d+)$/i) || text.match(/^reject\s*(\d+)$/i);
+    const jobCmd = text.match(/^(start|end|pause|resume)\s*(\d+)$/i);
+    if (jobCmd) {
+      const eventType = jobCmd[1].toLowerCase() === 'end' ? 'ended' : jobCmd[1].toLowerCase();
+      const bookingId = parseInt(jobCmd[2], 10);
+      return handleProviderJobEvent(waFrom, existing, bookingId, eventType);
+    }
+
+    const jobMatch =
+      text.match(/^accept\s*(\d+)$/i) ||
+      text.match(/^reject\s*(\d+)$/i) ||
+      (textLower === 'accept' ? ['accept', ''] : null) ||
+      (textLower === 'reject' || textLower === 'decline' ? ['reject', ''] : null);
     if (jobMatch) {
-      const id = parseInt(jobMatch[1], 10);
+      let id = jobMatch[1] ? parseInt(jobMatch[1], 10) : NaN;
+      if (Number.isNaN(id)) {
+        id = await resolveSingleProviderBookingId(existing.id, 'awaiting_provider_accept');
+        if (!id) {
+          return 'Reply *ACCEPT <booking id>* or *REJECT <booking id>*. Reply *4* to list your jobs.';
+        }
+      }
       return jobMatch[0].toLowerCase().startsWith('accept')
         ? handleProviderAcceptJob(waFrom, existing, id)
         : handleProviderRejectJob(waFrom, existing, id);
+    }
+  }
+
+  // Farmer quick reply after provider ends job (notification asks 1 or 2)
+  if (existing?.type === 'farmer' && !inActiveFlow && (text === '1' || text === '2')) {
+    const pending = await getFarmerConfirmableBookings(existing.id);
+    if (pending.length === 1) {
+      if (text === '1') {
+        try {
+          await confirmWorkAndReleasePayment(pending[0].id, existing.id);
+          return (
+            `Thank you. *${pending[0].service_type}* has been confirmed complete. ` +
+            `Payment has been sent to *${pending[0].provider_name || 'your provider'}*. Reply *MENU* for options.`
+          );
+        } catch (err) {
+          console.error('Farmer quick confirm:', err.message);
+          return 'We could not confirm this job. Use *4 Confirm Job* from the menu or contact support.';
+        }
+      }
+      return (
+        'To open a dispute, contact support at contact@digilync.com with your booking details.\n\n' +
+        'Reply *MENU* for options.'
+      );
     }
   }
 
@@ -1180,11 +1220,12 @@ function getRequestInputMessage(data = {}) {
   const hasPresetFarm = data.farm_size_ha != null;
   const useSavedPin = hasUsableFarmGps(data.farm_gps_lat, data.farm_gps_lng);
   const followUp = useSavedPin
-    ? 'We will use your saved farm pin to match providers.'
-    : 'You will receive a link to confirm the job location on the map.';
+    ? 'We will use your saved farm pin to match providers automatically.'
+    : 'You will receive a link to confirm the job location, then we match providers automatically.';
   let description =
     '*Request a service*\n\n' +
-    'Choose one or more services (reply numbers separated by commas).\n' +
+    'Choose one or more services (reply with numbers separated by commas, e.g. *1,3,5*).\n' +
+    'Each service is matched automatically to the best available provider near your farm.\n' +
     'After selecting, you will provide preferred date, time, and budget range.';
   if (hasPresetFarm) {
     description += `\n\nFarm size on file: ${data.farm_size_ha} ha.`;
@@ -1298,7 +1339,7 @@ async function handleRequestFlow(waFrom, session, data, text, latitude, longitud
       const fullPending = { ...data, request_pending: requestPending };
       if (hasUsableFarmGps(farmLat, farmLng)) {
         try {
-          const r = await beginProviderSelection(
+          const r = await autoMatchServiceRequest(
             waFrom,
             existing,
             farmLat,
@@ -1309,9 +1350,9 @@ async function handleRequestFlow(waFrom, session, data, text, latitude, longitud
           );
           if (r.ok) return null;
         } catch (err) {
-          console.error('beginProviderSelection:', err);
+          console.error('autoMatchServiceRequest:', err);
         }
-        return 'Something went wrong while loading providers. Reply *MENU* to try again.';
+        return 'Something went wrong while matching providers. Reply *MENU* to try again.';
       }
       const token = crypto.randomUUID();
       const gpsUrl = `${getFrontendBaseUrl()}/gps?t=${encodeURIComponent(token)}&purpose=request`;
@@ -1352,52 +1393,12 @@ async function handleRequestFlow(waFrom, session, data, text, latitude, longitud
       return 'Open the GPS link we sent, then return here. Reply *1* to resend. Reply *MENU* to cancel.';
     }
 
-    case 'request_choose_provider': {
-      const m = String(text || '').trim().match(/^pick_prov_(\d+)$/i);
-      const providerId = m ? parseInt(m[1], 10) : NaN;
-      if (Number.isNaN(providerId)) {
-        const recs = (data.candidate_providers || []).slice(0, 10);
-        if (!recs.length) {
-          await updateSession(waFrom, { step: 'main_menu', data: {} });
-          return 'Session expired. Reply *MENU* and request service again.';
-        }
-        return buildOptionListReply(
-          'Select a provider from the list.',
-          recs.map((c) => ({
-            id: `pick_prov_${c.providerId}`,
-            title: String(c.name).slice(0, 24),
-            description: `${c.farmerPayable.toLocaleString()} FCFA`.slice(0, 72),
-          }))
-        );
-      }
-      const slotResult = await showSlotsForProvider(waFrom, data, providerId, updateSession);
-      if (!slotResult.ok) {
-        return slotResult.message || 'Could not load slots. Pick another provider or *MENU* to cancel.';
-      }
-      return slotResult.reply;
-    }
-
+    case 'request_choose_provider':
     case 'request_choose_slot': {
-      const m = String(text || '').trim().match(/^slot_(\d+)$/i);
-      const slotId = m ? parseInt(m[1], 10) : NaN;
-      if (Number.isNaN(slotId)) {
-        const slots = data.available_slots || [];
-        if (!slots.length) {
-          await updateSession(waFrom, { step: 'main_menu', data: {} });
-          return 'Session expired. Reply *MENU* to try again.';
-        }
-        return buildOptionListReply(
-          'Select a time slot.',
-          slots.slice(0, 10).map((s) => ({
-            id: `slot_${s.id}`,
-            title: `${s.available_date} ${String(s.start_time).slice(0, 5)}`.slice(0, 24),
-            description: String(s.end_time).slice(0, 5),
-          }))
-        );
-      }
-      const fin = await finalizeSlotAndNotifyProvider(waFrom, existing, data, slotId, updateSession);
-      if (!fin.ok) return 'Could not create booking. Reply *MENU* to try again.';
-      return null;
+      await updateSession(waFrom, { step: 'main_menu', data: {} });
+      return (
+        'Provider matching is now automatic. Reply *3* to request a service again, or *5* to view your requests.'
+      );
     }
 
     default:
@@ -1770,7 +1771,7 @@ async function handleMyRequests(waFrom, existing) {
     if (r.rows.length === 0) return 'You have no requests yet. Reply *3* to request a service.';
     let msg = 'Your requests:\n\n';
     r.rows.forEach((b, i) => {
-      msg += `${i + 1}. ${b.service_type} — ${b.scheduled_date || 'TBD'} — ${b.status}`;
+      msg += `${i + 1}. ${b.service_type} — ${b.scheduled_date || 'TBD'} — ${b.status.replace(/_/g, ' ')}`;
       if (b.provider_name) msg += ` — ${b.provider_name}`;
       if (b.payment_status) msg += ` — ${b.payment_status}`;
       msg += '\n';
@@ -1780,19 +1781,42 @@ async function handleMyRequests(waFrom, existing) {
   }
   if (existing.type === 'provider') {
     const jobs = await pool.query(
-      `SELECT b.id, b.service_type, b.farm_size_ha, b.status, f.full_name AS farmer_name
+      `SELECT b.id, b.service_type, b.farm_size_ha, b.status, b.scheduled_date, f.full_name AS farmer_name
        FROM bookings b
        JOIN farmers f ON b.farmer_id = f.id
-       WHERE b.provider_id = $1 AND b.status IN ('awaiting_provider_accept', 'matched', 'confirmed', 'in_progress')
-       ORDER BY b.scheduled_date ASC NULLS LAST`,
+       WHERE b.provider_id = $1
+         AND b.status IN (
+           'awaiting_provider_accept', 'matched', 'confirmed', 'in_progress', 'awaiting_farmer_confirmation'
+         )
+       ORDER BY
+         CASE b.status
+           WHEN 'awaiting_provider_accept' THEN 0
+           WHEN 'confirmed' THEN 1
+           WHEN 'in_progress' THEN 2
+           WHEN 'matched' THEN 3
+           ELSE 4
+         END,
+         b.scheduled_date ASC NULLS LAST`,
       [existing.id]
     );
     if (jobs.rows.length === 0) return 'You have no pending jobs. Reply *MENU* for options.';
     let msg = '📋 *Your Jobs:*\n\n';
-    jobs.rows.forEach((j, i) => {
-      const estTotal = Math.round((j.farm_size_ha || 0) * 12000);
-      msg += `${i + 1}. ${j.service_type} – ${j.farmer_name} (${j.farm_size_ha} ha)\n`;
-      msg += `   Reply *ACCEPT ${j.id}* or *REJECT ${j.id}*\n\n`;
+    jobs.rows.forEach((j) => {
+      msg += `*#${j.id}* ${j.service_type} – ${j.farmer_name}`;
+      if (j.scheduled_date) msg += ` (${String(j.scheduled_date).slice(0, 10)})`;
+      msg += `\nStatus: ${j.status.replace(/_/g, ' ')}\n`;
+      if (j.status === 'awaiting_provider_accept') {
+        msg += `Reply *ACCEPT ${j.id}* or *REJECT ${j.id}*\n\n`;
+      } else if (j.status === 'matched') {
+        msg += 'Waiting for farmer to pay to escrow.\n\n';
+      } else if (j.status === 'confirmed') {
+        msg += `Reply *START ${j.id}* when you begin work.\n\n`;
+      } else if (j.status === 'in_progress') {
+        msg += `Reply *END ${j.id}* when work is 100% complete.\n`;
+        msg += `Optional: *PAUSE ${j.id}* or *RESUME ${j.id}*\n\n`;
+      } else if (j.status === 'awaiting_farmer_confirmation') {
+        msg += 'Waiting for farmer to confirm completion and release payment.\n\n';
+      }
     });
     return msg;
   }
@@ -1994,6 +2018,38 @@ async function handleFarmerConfirmationsFlow(waFrom, existing, text, data) {
     console.error('Farmer confirmation flow error:', err.message);
     await updateSession(waFrom, { step: 'main_menu', data: {} });
     return 'An error occurred. Reply *MENU* for options.';
+  }
+}
+
+async function resolveSingleProviderBookingId(providerId, status) {
+  const r = await pool.query(
+    `SELECT id FROM bookings WHERE provider_id = $1 AND status = $2 ORDER BY created_at DESC LIMIT 2`,
+    [providerId, status]
+  );
+  if (r.rows.length === 1) return r.rows[0].id;
+  return null;
+}
+
+async function handleProviderJobEvent(waFrom, existing, bookingId, eventType) {
+  try {
+    const result = await recordProviderJobEvent(bookingId, existing.id, eventType);
+    if (!result.ok) return providerJobErrorMessage(result);
+    if (eventType === 'started') {
+      return (
+        `✅ Job #${bookingId} started. The farmer has been notified.\n\n` +
+        `When work is 100% complete, reply *END ${bookingId}*. Reply *MENU* for options.`
+      );
+    }
+    if (eventType === 'ended') {
+      return (
+        `✅ Job #${bookingId} marked complete. The farmer will confirm before payment is released.\n\n` +
+        'Reply *MENU* for options.'
+      );
+    }
+    return `Job #${bookingId} updated (${eventType}). Reply *4* for your jobs.`;
+  } catch (err) {
+    console.error('handleProviderJobEvent:', err.message);
+    return 'Something went wrong. Reply *4* to try again.';
   }
 }
 
