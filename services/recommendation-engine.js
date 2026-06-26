@@ -8,6 +8,20 @@ const { calculateServiceEconomics, calculateBookingEconomics } = require('./oper
 
 const AVAILABILITY_WINDOW_DAYS = 5;
 const MAX_RECOMMENDATIONS = 10;
+/** Default service radius when provider has none set (km). */
+const DEFAULT_SERVICE_RADIUS_KM = 75;
+
+function farmerHasGps(farmerLat, farmerLng) {
+  const la = farmerLat != null ? parseFloat(farmerLat) : NaN;
+  const lo = farmerLng != null ? parseFloat(farmerLng) : NaN;
+  return !Number.isNaN(la) && !Number.isNaN(lo) && !(la === 0 && lo === 0);
+}
+
+function providerHasGps(prLat, prLng) {
+  const la = prLat != null ? parseFloat(prLat) : NaN;
+  const lo = prLng != null ? parseFloat(prLng) : NaN;
+  return !Number.isNaN(la) && !Number.isNaN(lo) && !(la === 0 && lo === 0);
+}
 
 async function calculateReputationScore(providerId) {
   const ratingsRes = await pool.query(
@@ -155,15 +169,14 @@ async function getRecommendedProvidersAtLocation(
       const prLat = parseFloat(row.gps_lat);
       const prLng = parseFloat(row.gps_lng);
       let distance = null;
-      if (
-        farmerLat != null &&
-        farmerLng != null &&
-        !Number.isNaN(prLat) &&
-        !Number.isNaN(prLng)
-      ) {
+      const locationRequired = farmerHasGps(farmerLat, farmerLng);
+      if (locationRequired) {
+        if (!providerHasGps(prLat, prLng)) return null;
         distance = haversineDistanceKm(farmerLat, farmerLng, prLat, prLng);
-        const radius = parseFloat(row.service_radius_km) || 999;
+        const radius = parseFloat(row.service_radius_km) || DEFAULT_SERVICE_RADIUS_KM;
         if (distance > radius) return null;
+      } else if (providerHasGps(prLat, prLng)) {
+        distance = haversineDistanceKm(farmerLat, farmerLng, prLat, prLng);
       }
 
       const serviceRow = row.ps_id
@@ -236,19 +249,34 @@ async function getRecommendedProviders(
   serviceType,
   requestedDate,
   farmSizeHa,
-  budgetMax = null
+  budgetMax = null,
+  budgetMin = null
 ) {
   const farmerRes = await pool.query(`SELECT gps_lat, gps_lng FROM farmers WHERE id = $1`, [farmerId]);
   if (farmerRes.rows.length === 0) throw new Error('Farmer not found');
   const farmer = farmerRes.rows[0];
-  if (!farmer.gps_lat || !farmer.gps_lng) throw new Error('Farmer location not set');
+  let lat = parseFloat(farmer.gps_lat);
+  let lng = parseFloat(farmer.gps_lng);
+  if (!farmerHasGps(lat, lng)) {
+    const plotRes = await pool.query(
+      `SELECT gps_lat, gps_lng FROM farm_plots
+       WHERE farmer_id = $1 AND gps_lat IS NOT NULL AND gps_lng IS NOT NULL
+       ORDER BY id LIMIT 1`,
+      [farmerId]
+    );
+    if (plotRes.rows.length > 0) {
+      lat = parseFloat(plotRes.rows[0].gps_lat);
+      lng = parseFloat(plotRes.rows[0].gps_lng);
+    }
+  }
+  if (!farmerHasGps(lat, lng)) throw new Error('Farmer location not set');
   return getRecommendedProvidersAtLocation(
-    parseFloat(farmer.gps_lat),
-    parseFloat(farmer.gps_lng),
+    lat,
+    lng,
     serviceType,
     requestedDate,
     farmSizeHa,
-    null,
+    budgetMin,
     budgetMax
   );
 }

@@ -24,11 +24,20 @@ router.get('/stats', async (req, res) => {
     }
 
     let pendingRequests = 0;
+    let awaitingProviderAccept = 0;
     try {
       const r = await pool.query("SELECT COUNT(*)::int AS count FROM bookings WHERE provider_id IS NULL AND status = 'pending'");
       pendingRequests = r.rows[0]?.count ?? 0;
     } catch (_) {
       /* ignore pending requests count errors */
+    }
+    try {
+      const r = await pool.query(
+        "SELECT COUNT(*)::int AS count FROM bookings WHERE status = 'awaiting_provider_accept' AND provider_id IS NOT NULL"
+      );
+      awaitingProviderAccept = r.rows[0]?.count ?? 0;
+    } catch (_) {
+      /* ignore */
     }
 
     res.json({
@@ -36,6 +45,7 @@ router.get('/stats', async (req, res) => {
       providers: providersCount,
       bookings: bookingsCount,
       pendingRequests,
+      awaitingProviderAccept,
     });
   } catch (err) {
     console.error('Dashboard stats error:', err);

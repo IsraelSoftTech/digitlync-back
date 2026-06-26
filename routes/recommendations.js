@@ -14,7 +14,7 @@ const { getRecommendedProviders, getProviderAvailableSlots } = require('../servi
  * - budget_max: optional (max farmer budget)
  */
 router.get('/', async (req, res) => {
-  const { farmer_id, service_type, requested_date, farm_size_ha, budget_max } = req.query;
+  const { farmer_id, service_type, requested_date, farm_size_ha, budget_max, budget_min } = req.query;
 
   if (!farmer_id || !service_type || !requested_date || !farm_size_ha) {
     return res.status(400).json({
@@ -28,7 +28,8 @@ router.get('/', async (req, res) => {
       service_type,
       requested_date,
       parseFloat(farm_size_ha),
-      budget_max ? parseFloat(budget_max) : null
+      budget_max ? parseFloat(budget_max) : null,
+      budget_min ? parseFloat(budget_min) : null
     );
 
     res.json({

@@ -10,6 +10,7 @@ const {
   notifyProviderBookingRequest,
 } = require('./matching-flow');
 const { sendBrandedText } = require('./whatsapp-sender');
+const { logAudit } = require('./audit-log');
 
 function normalizePhone(waFrom) {
   if (!waFrom) return '';
@@ -174,6 +175,8 @@ async function autoMatchSingleService(farmer, lat, lng, serviceType, requestPend
       scheduled_date: scheduledDate,
       scheduled_time: scheduledTime,
       requested_qty: requestPending.farm_size_ha,
+      budget_min_fcfa: budget.min,
+      budget_max_fcfa: budget.max,
     },
     economics,
     slot ? slot.id : null,
@@ -183,6 +186,15 @@ async function autoMatchSingleService(farmer, lat, lng, serviceType, requestPend
   const provider = { full_name: rec.name, phone: rec.phone };
   const farmerUser = { full_name: farmer.name, phone: farmer.phone || null };
   await notifyProviderBookingRequest(booking, farmerUser, provider);
+
+  await logAudit({
+    adminId: null,
+    adminUsername: 'system',
+    actionType: 'matching',
+    action: `Auto-matched ${serviceType} → provider ${rec.name} (booking #${booking.id}, ${rec.farmerPayable.toLocaleString()} FCFA, ${rec.distanceDisplay || 'nearby'})`,
+    entityType: 'booking',
+    entityId: booking.id,
+  });
 
   return {
     ok: true,
@@ -227,6 +239,14 @@ async function autoMatchServiceRequest(waPhone, farmer, lat, lng, requestPending
       } else {
         await createPendingAdminBooking(farmer.id, requestPending, serviceType);
         noMatchServices.push(serviceType);
+        await logAudit({
+          adminId: null,
+          adminUsername: 'system',
+          actionType: 'matching',
+          action: `No auto-match for ${serviceType} (farmer #${farmer.id}) — location/budget/service criteria`,
+          entityType: 'booking',
+          entityId: null,
+        });
       }
     } catch (err) {
       console.error(`autoMatchServiceRequest (${serviceType}):`, err.message);

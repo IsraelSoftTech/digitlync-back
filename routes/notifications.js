@@ -45,7 +45,7 @@ router.get('/', async (req, res) => {
     });
 
     const pendingBookings = await pool.query(
-      `SELECT COUNT(*)::int AS c FROM bookings WHERE status = 'pending' AND provider_id IS NOT NULL`
+      `SELECT COUNT(*)::int AS c FROM bookings WHERE status = 'awaiting_provider_accept' AND provider_id IS NOT NULL`
     );
     const pendingCount = pendingBookings.rows[0]?.c ?? 0;
     if (pendingCount > 0) {
@@ -53,9 +53,26 @@ router.get('/', async (req, res) => {
         id: 'pending-confirm',
         type: 'info',
         title: 'Awaiting provider confirmation',
-        message: `${pendingCount} booking(s) pending provider acceptance.`,
+        message: `${pendingCount} auto-matched booking(s) waiting for provider acceptance.`,
         count: pendingCount,
-        link: '/bookings?status=pending',
+        link: '/bookings?status=awaiting_provider_accept',
+        created_at: new Date().toISOString(),
+      });
+    }
+
+    const recentAutoMatched = await pool.query(
+      `SELECT COUNT(*)::int AS c FROM admin_audit_logs
+       WHERE action_type = 'matching' AND created_at > NOW() - INTERVAL '24 hours'`
+    );
+    const recentMatchCount = recentAutoMatched.rows[0]?.c ?? 0;
+    if (recentMatchCount > 0) {
+      alerts.push({
+        id: 'recent-auto-match',
+        type: 'matching',
+        title: 'Recent auto-matches',
+        message: `${recentMatchCount} automatic match event(s) in the last 24 hours.`,
+        count: recentMatchCount,
+        link: '/audit',
         created_at: new Date().toISOString(),
       });
     }

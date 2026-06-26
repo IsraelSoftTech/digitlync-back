@@ -25,7 +25,11 @@ const {
   providerAcceptBooking,
   providerRejectBooking,
 } = require('./matching-flow');
-const { recordProviderJobEvent, providerJobErrorMessage } = require('./provider-job-flow');
+const {
+  recordProviderJobEvent,
+  providerJobErrorMessage,
+  normalizeProviderJobEventType,
+} = require('./provider-job-flow');
 
 const SERVICE_LIST = [
   'Ploughing', 'Planting', 'Spraying', 'Irrigation', 'Harvesting',
@@ -311,10 +315,13 @@ async function applyServiceRequestGpsFromWeb(waPhone, lat, lng) {
 
   const session = await getSession(waPhone);
   const data = parseSessionData(session.data);
-  if (session.step === 'request_await_gps_web' || session.step === 'main_menu') {
+  if (session.step === 'main_menu' && !data.request_pending) {
     return { ok: true, already_completed: true };
   }
-  if (session.step !== 'request_await_gps_web' || !data.request_pending) {
+  if (session.step !== 'request_await_gps_web' && session.step !== 'main_menu') {
+    return { ok: false, error: 'bad_step' };
+  }
+  if (!data.request_pending) {
     return { ok: false, error: 'bad_step' };
   }
 
@@ -722,6 +729,12 @@ async function handleIncoming(waFrom, body, latitude, longitude, profileName) {
     return getHelpMessage(existing);
   }
 
+  // Provider job lifecycle + accept/reject — always honored (even during other flows)
+  if (existing?.type === 'provider') {
+    const providerCmdReply = await tryHandleProviderBookingCommands(waFrom, existing, text);
+    if (providerCmdReply != null) return providerCmdReply;
+  }
+
   // Help shortcut only when not in an active flow
   if (textLower === '5' && !inActiveFlow && existing?.type !== 'farmer') {
     return getHelpMessage(existing);
@@ -867,34 +880,6 @@ async function handleIncoming(waFrom, body, latitude, longitude, profileName) {
   }
   if (session.step && session.step.startsWith('request_')) {
     return handleRequestFlow(waFrom, session, data, text, latitude, longitude, existing);
-  }
-
-  // Provider accept/reject booking requests + job lifecycle commands
-  if (existing?.type === 'provider') {
-    const jobCmd = text.match(/^(start|end|pause|resume)\s*(\d+)$/i);
-    if (jobCmd) {
-      const eventType = jobCmd[1].toLowerCase() === 'end' ? 'ended' : jobCmd[1].toLowerCase();
-      const bookingId = parseInt(jobCmd[2], 10);
-      return handleProviderJobEvent(waFrom, existing, bookingId, eventType);
-    }
-
-    const jobMatch =
-      text.match(/^accept\s*(\d+)$/i) ||
-      text.match(/^reject\s*(\d+)$/i) ||
-      (textLower === 'accept' ? ['accept', ''] : null) ||
-      (textLower === 'reject' || textLower === 'decline' ? ['reject', ''] : null);
-    if (jobMatch) {
-      let id = jobMatch[1] ? parseInt(jobMatch[1], 10) : NaN;
-      if (Number.isNaN(id)) {
-        id = await resolveSingleProviderBookingId(existing.id, 'awaiting_provider_accept');
-        if (!id) {
-          return 'Reply *ACCEPT <booking id>* or *REJECT <booking id>*. Reply *4* to list your jobs.';
-        }
-      }
-      return jobMatch[0].toLowerCase().startsWith('accept')
-        ? handleProviderAcceptJob(waFrom, existing, id)
-        : handleProviderRejectJob(waFrom, existing, id);
-    }
   }
 
   // Farmer quick reply after provider ends job (notification asks 1 or 2)
@@ -1214,6 +1199,24 @@ function hasUsableFarmGps(lat, lng) {
   if (la < -90 || la > 90 || lo < -180 || lo > 180) return false;
   if (la === 0 && lo === 0) return false;
   return true;
+}
+
+async function resolveFarmerMatchGps(farmerId) {
+  const fRes = await pool.query('SELECT gps_lat, gps_lng FROM farmers WHERE id = $1', [farmerId]);
+  const f = fRes.rows[0];
+  let lat = f?.gps_lat != null ? parseFloat(f.gps_lat) : NaN;
+  let lng = f?.gps_lng != null ? parseFloat(f.gps_lng) : NaN;
+  if (!hasUsableFarmGps(lat, lng)) {
+    const plot = await pool.query(
+      `SELECT gps_lat, gps_lng FROM farm_plots WHERE farmer_id = $1 ORDER BY id LIMIT 1`,
+      [farmerId]
+    );
+    if (plot.rows.length > 0) {
+      lat = parseFloat(plot.rows[0].gps_lat);
+      lng = parseFloat(plot.rows[0].gps_lng);
+    }
+  }
+  return hasUsableFarmGps(lat, lng) ? { lat, lng } : null;
 }
 
 function getRequestInputMessage(data = {}) {
@@ -2030,6 +2033,34 @@ async function resolveSingleProviderBookingId(providerId, status) {
   return null;
 }
 
+async function tryHandleProviderBookingCommands(waFrom, existing, text) {
+  const textLower = text.toLowerCase();
+  const jobCmd = text.match(/^(start|end|pause|resume)\s*(\d+)$/i);
+  if (jobCmd) {
+    const eventType = normalizeProviderJobEventType(jobCmd[1]);
+    const bookingId = parseInt(jobCmd[2], 10);
+    return handleProviderJobEvent(waFrom, existing, bookingId, eventType);
+  }
+
+  const jobMatch =
+    text.match(/^accept\s*(\d+)$/i) ||
+    text.match(/^reject\s*(\d+)$/i) ||
+    (textLower === 'accept' ? ['accept', ''] : null) ||
+    (textLower === 'reject' || textLower === 'decline' ? ['reject', ''] : null);
+  if (!jobMatch) return null;
+
+  let id = jobMatch[1] ? parseInt(jobMatch[1], 10) : NaN;
+  if (Number.isNaN(id)) {
+    id = await resolveSingleProviderBookingId(existing.id, 'awaiting_provider_accept');
+    if (!id) {
+      return 'Reply *ACCEPT <booking id>* or *REJECT <booking id>*. Reply *4* to list your jobs.';
+    }
+  }
+  return jobMatch[0].toLowerCase().startsWith('accept')
+    ? handleProviderAcceptJob(waFrom, existing, id)
+    : handleProviderRejectJob(waFrom, existing, id);
+}
+
 async function handleProviderJobEvent(waFrom, existing, bookingId, eventType) {
   try {
     const result = await recordProviderJobEvent(bookingId, existing.id, eventType);
@@ -2079,8 +2110,7 @@ async function handleProviderRejectJob(waFrom, existing, bookingId) {
     );
     if (farmerRow.rows.length > 0) {
       const f = farmerRow.rows[0];
-      const lat = parseFloat(f.gps_lat);
-      const lng = parseFloat(f.gps_lng);
+      const gps = await resolveFarmerMatchGps(booking.farmer_id);
       const requestPending = {
         farmer_id: booking.farmer_id,
         service_type: booking.service_type,
@@ -2090,13 +2120,13 @@ async function handleProviderRejectJob(waFrom, existing, bookingId) {
         budget_min_fcfa: booking.budget_min_fcfa,
         budget_max_fcfa: booking.budget_max_fcfa,
       };
-      if (!Number.isNaN(lat) && !Number.isNaN(lng)) {
+      if (gps) {
         await reofferAfterProviderReject(
           f.phone,
           { id: f.id, name: 'Farmer' },
           requestPending,
-          lat,
-          lng,
+          gps.lat,
+          gps.lng,
           [existing.id],
           updateSession
         );

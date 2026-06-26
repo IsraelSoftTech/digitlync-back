@@ -22,6 +22,23 @@ const REQUIRED_BOOKING_STATUS = {
 
 const DUPLICATE_EVENT_TYPES = ['started', 'ended'];
 
+const JOB_VERB_TO_EVENT = {
+  start: 'started',
+  started: 'started',
+  end: 'ended',
+  ended: 'ended',
+  pause: 'paused',
+  paused: 'paused',
+  resume: 'resumed',
+  resumed: 'resumed',
+};
+
+/** Map WhatsApp verbs (START, END, …) to internal event types. */
+function normalizeProviderJobEventType(verb) {
+  const key = String(verb || '').trim().toLowerCase();
+  return JOB_VERB_TO_EVENT[key] || key;
+}
+
 async function loadBookingForProvider(bookingId, providerId) {
   const r = await pool.query(
     `SELECT b.*, f.id AS farmer_id, f.full_name AS farmer_name, f.phone AS farmer_phone,
@@ -40,7 +57,7 @@ async function loadBookingForProvider(bookingId, providerId) {
  * @returns {{ ok: true, booking: object, eventType: string } | { ok: false, error: string }}
  */
 async function recordProviderJobEvent(bookingId, providerId, eventType, note = null) {
-  const normalized = String(eventType || '').trim().toLowerCase();
+  const normalized = normalizeProviderJobEventType(eventType);
   if (!EVENT_TO_STATUS[normalized]) {
     return { ok: false, error: 'invalid_event' };
   }
@@ -141,5 +158,6 @@ function providerJobErrorMessage(result) {
 module.exports = {
   recordProviderJobEvent,
   providerJobErrorMessage,
+  normalizeProviderJobEventType,
   EVENT_TO_STATUS,
 };
