@@ -357,23 +357,27 @@ async function confirmWorkAndReleasePayment(bookingId, farmerId = null) {
 
   const paymentResult = await paymentProcessor.processPaymentRelease(bookingId, farmerId, farmerId == null);
 
-  const providerAmount = paymentResult.providerAmount || booking.provider_base_amount_fcfa;
-  const amountStr = roundMoney(providerAmount).toLocaleString();
-  if (booking.provider_phone) {
-    await sendBrandedText(
-      booking.provider_phone,
-      `You have been paid *${amountStr} FCFA* for *${booking.service_type}* with *${booking.farmer_name}*. Thank you for using DigiLync.`
-    ).catch((e) => console.error('confirmWork provider notify:', e.message));
-  }
-  if (booking.farmer_phone) {
-    await sendBrandedText(
-      booking.farmer_phone,
-      `Payment of *${amountStr} FCFA* has been sent to *${booking.provider_name}* for *${booking.service_type}*.\n\n` +
-        'Reply *RATE* to rate this service (1–5 stars).'
-    ).catch((e) => console.error('confirmWork farmer notify:', e.message));
-  }
+  const farmer = {
+    id: booking.farmer_id,
+    full_name: booking.farmer_name,
+    phone: booking.farmer_phone,
+  };
+  const provider = {
+    id: booking.provider_id,
+    full_name: booking.provider_name,
+    phone: booking.provider_phone,
+  };
+  const updatedBooking = {
+    ...booking,
+    payment_status: 'released',
+    provider_base_amount_fcfa: paymentResult.providerAmount || booking.provider_base_amount_fcfa,
+    payout_method: paymentResult.payoutMethod || 'Mobile Money',
+  };
+  await notificationService
+    .sendPaymentReleasedNotification(bookingId, farmer, provider, updatedBooking)
+    .catch((e) => console.error('confirmWork payment notifications:', e.message));
 
-  return { booking, paymentResult };
+  return { booking: updatedBooking, paymentResult };
 }
 
 async function getFarmerConfirmableBookings(farmerId) {

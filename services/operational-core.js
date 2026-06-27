@@ -232,6 +232,20 @@ async function ensureOperationalSchema() {
       used_at TIMESTAMP
     )
   `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS notifications_log (
+      id SERIAL PRIMARY KEY,
+      booking_id INTEGER REFERENCES bookings(id) ON DELETE SET NULL,
+      farmer_id INTEGER REFERENCES farmers(id) ON DELETE SET NULL,
+      provider_id INTEGER REFERENCES providers(id) ON DELETE SET NULL,
+      recipient_phone VARCHAR(32),
+      message_type VARCHAR(64),
+      message_body TEXT,
+      status VARCHAR(32) DEFAULT 'sent',
+      sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
 }
 
 module.exports = {

@@ -642,6 +642,7 @@ async function handleIncoming(waFrom, body, latitude, longitude, profileName) {
         session.step.startsWith('farmer_escrow') ||
         session.step === 'confirm_job_select' ||
         session.step === 'confirm_job_confirm' ||
+        session.step === 'farmer_job_completion' ||
         session.step === 'privacy_consent_new' ||
         session.step === 'unsubscribe_confirm' ||
         session.step === 'recap_options' ||
@@ -704,6 +705,9 @@ async function handleIncoming(waFrom, body, latitude, longitude, profileName) {
   }
   if (session.step === 'confirm_job_confirm' && existing?.type === 'farmer') {
     return handleConfirmJobConfirm(waFrom, existing, text, data);
+  }
+  if (session.step === 'farmer_job_completion' && existing?.type === 'farmer') {
+    return handleFarmerJobCompletionReply(waFrom, existing, text, data);
   }
 
   if (session.step === 'rating_select' && existing?.type === 'farmer') {
@@ -2035,7 +2039,11 @@ async function resolveSingleProviderBookingId(providerId, status) {
 
 async function tryHandleProviderBookingCommands(waFrom, existing, text) {
   const textLower = text.toLowerCase();
-  const jobCmd = text.match(/^(start|end|pause|resume)\s*(\d+)$/i);
+  const cleanedCmd = String(text || '')
+    .trim()
+    .replace(/^\*+|\*+$/g, '')
+    .replace(/\s+/g, ' ');
+  const jobCmd = cleanedCmd.match(/^(start|end|pause|resume)\s*#?(\d+)$/i);
   if (jobCmd) {
     const eventType = normalizeProviderJobEventType(jobCmd[1]);
     const bookingId = parseInt(jobCmd[2], 10);
@@ -2061,25 +2069,98 @@ async function tryHandleProviderBookingCommands(waFrom, existing, text) {
     : handleProviderRejectJob(waFrom, existing, id);
 }
 
+async function setFarmerJobCompletionSession(farmerPhone, bookingId, farmerId) {
+  if (!farmerPhone) return;
+  const waPhone = normalizePhone(farmerPhone);
+  await pool.query(
+    `INSERT INTO whatsapp_sessions (wa_phone, user_type, step, data)
+     VALUES ($1, 'farmer', 'farmer_job_completion', $2::jsonb)
+     ON CONFLICT (wa_phone) DO UPDATE SET
+       user_type = 'farmer',
+       step = 'farmer_job_completion',
+       data = EXCLUDED.data,
+       updated_at = CURRENT_TIMESTAMP`,
+    [waPhone, JSON.stringify({ booking_id: bookingId, farmer_id: farmerId })]
+  );
+}
+
+async function handleFarmerJobCompletionReply(waFrom, existing, text, data) {
+  const t = String(text || '').trim();
+  const bookingId = parseInt(data.booking_id, 10);
+  if (Number.isNaN(bookingId)) {
+    await updateSession(waFrom, { step: 'main_menu', data: {} });
+    return handleConfirmJobMenu(waFrom, existing);
+  }
+  if (t === '0' || t.toLowerCase() === 'cancel') {
+    await updateSession(waFrom, { step: 'main_menu', data: {} });
+    return getMainMenu(existing);
+  }
+  if (t === '2' || t.toLowerCase() === 'no') {
+    await updateSession(waFrom, { step: 'main_menu', data: {} });
+    return (
+      'To open a dispute, contact support at contact@digilync.com with your booking details.\n\n' +
+      'Reply *MENU* for options.'
+    );
+  }
+  if (t === '1' || t.toLowerCase() === 'confirm' || t.toLowerCase() === 'yes') {
+    try {
+      await confirmWorkAndReleasePayment(bookingId, existing.id);
+      await updateSession(waFrom, { step: 'main_menu', data: {} });
+      return (
+        'Thank you. The job has been confirmed complete and payment has been released to your provider.\n\n' +
+        'Reply *RATE* to rate this service, or *MENU* for options.'
+      );
+    } catch (err) {
+      console.error('handleFarmerJobCompletionReply:', err.message);
+      await updateSession(waFrom, { step: 'main_menu', data: {} });
+      return 'We could not confirm this job. Use *4 Confirm Job* from the menu or contact support.';
+    }
+  }
+  return 'Reply *1* to confirm completion and release payment, or *2* to open a dispute.';
+}
+
 async function handleProviderJobEvent(waFrom, existing, bookingId, eventType) {
   try {
     const result = await recordProviderJobEvent(bookingId, existing.id, eventType);
     if (!result.ok) return providerJobErrorMessage(result);
-    if (eventType === 'started') {
+    const evt = result.eventType || eventType;
+    if (evt === 'started') {
       return (
         `✅ Job #${bookingId} started. The farmer has been notified.\n\n` +
         `When work is 100% complete, reply *END ${bookingId}*. Reply *MENU* for options.`
       );
     }
-    if (eventType === 'ended') {
+    if (evt === 'ended') {
+      try {
+        const fr = await pool.query(
+          `SELECT b.farmer_id, f.phone AS farmer_phone
+           FROM bookings b
+           JOIN farmers f ON b.farmer_id = f.id
+           WHERE b.id = $1`,
+          [bookingId]
+        );
+        if (fr.rows[0]) {
+          await setFarmerJobCompletionSession(
+            fr.rows[0].farmer_phone,
+            bookingId,
+            fr.rows[0].farmer_id
+          );
+        }
+      } catch (sessionErr) {
+        console.error('handleProviderJobEvent farmer session:', sessionErr.message);
+      }
       return (
         `✅ Job #${bookingId} marked complete. The farmer will confirm before payment is released.\n\n` +
         'Reply *MENU* for options.'
       );
     }
-    return `Job #${bookingId} updated (${eventType}). Reply *4* for your jobs.`;
+    return `Job #${bookingId} updated (${evt}). Reply *4* for your jobs.`;
   } catch (err) {
-    console.error('handleProviderJobEvent:', err.message);
+    console.error('handleProviderJobEvent:', err.message, {
+      bookingId,
+      providerId: existing.id,
+      eventType,
+    });
     return 'Something went wrong. Reply *4* to try again.';
   }
 }

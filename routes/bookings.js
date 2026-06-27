@@ -348,6 +348,14 @@ router.post('/:id/confirm', async (req, res) => {
       const farmer = { id: booking.farmer_id, full_name: booking.farmer_name, phone: booking.farmer_phone };
       const provider = { id: booking.provider_id, full_name: booking.provider_name, phone: booking.provider_phone };
 
+      if (booking.payment_status === 'held' && booking.status === 'matched') {
+        await pool.query(
+          `UPDATE bookings SET status = 'confirmed', updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
+          [booking.id]
+        );
+        booking.status = 'confirmed';
+      }
+
       await sendBookingConfirmationToFarmer(booking.id, farmer, provider, booking);
       await sendBookingConfirmationToProvider(booking.id, farmer, provider, booking);
 

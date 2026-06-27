@@ -3,8 +3,16 @@
  * Shared by REST job-events API and WhatsApp bot commands.
  */
 const { pool } = require('../config/db');
+const { ensureOperationalSchema } = require('./operational-core');
 const notificationService = require('./notification-service');
 const { sendBrandedText, isEnabled } = require('./whatsapp-sender');
+
+let operationalSchemaReady = false;
+async function ensureJobEventSchema() {
+  if (operationalSchemaReady) return;
+  await ensureOperationalSchema();
+  operationalSchemaReady = true;
+}
 
 const EVENT_TO_STATUS = {
   started: 'in_progress',
@@ -57,6 +65,8 @@ async function loadBookingForProvider(bookingId, providerId) {
  * @returns {{ ok: true, booking: object, eventType: string } | { ok: false, error: string }}
  */
 async function recordProviderJobEvent(bookingId, providerId, eventType, note = null) {
+  await ensureJobEventSchema();
+
   const normalized = normalizeProviderJobEventType(eventType);
   if (!EVENT_TO_STATUS[normalized]) {
     return { ok: false, error: 'invalid_event' };
@@ -132,6 +142,16 @@ async function recordProviderJobEvent(bookingId, providerId, eventType, note = n
     return { ok: true, booking: updated.rows[0], eventType: normalized };
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
+    console.error('recordProviderJobEvent failed:', {
+      bookingId,
+      providerId,
+      eventType: normalized,
+      message: err.message,
+    });
+    if (err.message && /booking_job_events|relation .* does not exist/i.test(err.message)) {
+      operationalSchemaReady = false;
+      return { ok: false, error: 'schema' };
+    }
     throw err;
   } finally {
     client.release();
@@ -150,6 +170,8 @@ function providerJobErrorMessage(result) {
         : 'This job has already been marked complete.';
     case 'invalid_event':
       return 'Invalid job command. Reply *4* for your jobs.';
+    case 'schema':
+      return 'Job tracking is being set up. Please send *START* again in a few seconds.';
     default:
       return 'Something went wrong. Reply *4* to try again.';
   }
