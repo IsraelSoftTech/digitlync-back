@@ -1,15 +1,16 @@
 /**
- * WhatsApp farmer service request — automatic multi-service matching (operational §5–7).
- * Ranks providers by service offered, location, availability, and reputation;
- * creates one booking per service (preferring different providers) and notifies both parties.
+ * WhatsApp farmer service request — farmer selects provider by service type.
+ * All providers offering the requested service are listed with key info;
+ * only the farmer's chosen provider receives the booking request.
  */
 const { pool } = require('../config/db');
-const { getRecommendedProvidersAtLocation } = require('./recommendation-engine');
+const { getProvidersByServiceType } = require('./recommendation-engine');
 const {
   createAwaitingProviderBooking,
   notifyProviderBookingRequest,
 } = require('./matching-flow');
-const { sendBrandedText } = require('./whatsapp-sender');
+const { sendBrandedText, sendBotReply } = require('./whatsapp-sender');
+const { buildOptionListReply } = require('./whatsapp-interactive');
 const { logAudit } = require('./audit-log');
 
 function normalizePhone(waFrom) {
@@ -78,7 +79,6 @@ function slotTimeMinutes(t) {
   return (parts[0] || 0) * 60 + (parts[1] || 0);
 }
 
-/** Pick the open slot closest to the farmer's preferred date and time. */
 async function pickBestSlot(providerId, scheduledDate, scheduledTime) {
   const slots = await getSlotsNearDate(providerId, scheduledDate);
   if (!slots.length) return null;
@@ -99,16 +99,14 @@ async function pickBestSlot(providerId, scheduledDate, scheduledTime) {
   return best;
 }
 
-function buildFarmerAutoMatchMessage(matches, noMatchServices) {
-  let msg = '✅ *Services matched automatically*\n\n';
-  if (matches.length > 0) {
-    msg += 'We found providers for your request:\n\n';
-    matches.forEach((m, i) => {
-      const dateStr = m.scheduledDate || 'TBD';
-      const timeStr = m.scheduledTime ? String(m.scheduledTime).slice(0, 5) : '';
+function buildFarmerSelectionCompleteMessage(completedBookings, noMatchServices = []) {
+  let msg = '✅ *Request submitted*\n\n';
+  if (completedBookings.length > 0) {
+    msg += 'Your provider choices:\n\n';
+    completedBookings.forEach((m, i) => {
       msg += `${i + 1}. *${m.serviceType}*\n`;
       msg += `   Provider: ${m.providerName}\n`;
-      msg += `   Booking #${m.bookingId} · ${dateStr}${timeStr ? ` ${timeStr}` : ''}\n`;
+      msg += `   Booking #${m.bookingId}\n`;
       msg += `   Est. total: ${m.farmerPayable.toLocaleString()} FCFA\n\n`;
     });
     msg +=
@@ -116,7 +114,7 @@ function buildFarmerAutoMatchMessage(matches, noMatchServices) {
       'You will receive a payment prompt after each provider accepts.\n\n';
   }
   if (noMatchServices.length > 0) {
-    msg += '⚠️ *No automatic match yet for:*\n';
+    msg += '⚠️ *No providers found for:*\n';
     noMatchServices.forEach((s) => {
       msg += `• ${s} — saved for admin assignment\n`;
     });
@@ -126,35 +124,130 @@ function buildFarmerAutoMatchMessage(matches, noMatchServices) {
   return msg;
 }
 
-/**
- * Auto-match a single service to the best available provider (excluding already-used providers).
- */
-async function autoMatchSingleService(farmer, lat, lng, serviceType, requestPending, excludeProviderIds = []) {
+function buildProviderListMessage(serviceType, providers, serviceIndex, serviceCount) {
+  const lines = providers.slice(0, 10).map((p, i) => {
+    const rating = p.avgRating ? `★${p.avgRating}` : 'No rating yet';
+    const dist = p.distanceDisplay || 'Distance N/A';
+    const avail = p.hasAvailability ? 'Available' : 'Check schedule';
+    return (
+      `${i + 1}. *${p.name}*\n` +
+      `   Price: ${p.farmerPayable.toLocaleString()} FCFA · ${rating} · ${dist}\n` +
+      `   ${avail}`
+    );
+  });
+  return (
+    `*${serviceType}* — choose your provider (${serviceIndex + 1}/${serviceCount}):\n\n` +
+    lines.join('\n\n') +
+    '\n\nSelect a provider from the list below.'
+  );
+}
+
+async function presentProviderSelection(waPhone, farmer, lat, lng, sessionData, updateSession) {
+  const requestPending = sessionData.request_pending;
+  const serviceTypes = sessionData.service_types || serviceTypesFromRequest(requestPending);
+  const serviceIndex = sessionData.service_index || 0;
+  const serviceType = serviceTypes[serviceIndex];
   const allTypes = serviceTypesFromRequest(requestPending);
   const budget = perServiceBudget(requestPending, allTypes.length);
 
-  const recs = await getRecommendedProvidersAtLocation(
+  const providers = await getProvidersByServiceType(
     lat,
     lng,
     serviceType,
     requestPending.scheduled_date,
     requestPending.farm_size_ha,
-    budget.min,
-    budget.max,
-    excludeProviderIds
+    sessionData.rejected_provider_ids || []
   );
 
-  if (!recs.length) {
-    return { ok: false, no_match: true, serviceType };
+  if (!providers.length) {
+    await createPendingAdminBooking(farmer.id, requestPending, serviceType);
+    await logAudit({
+      adminId: null,
+      adminUsername: 'system',
+      actionType: 'matching',
+      action: `No providers for ${serviceType} (farmer #${farmer.id}) — admin assignment`,
+      entityType: 'booking',
+      entityId: null,
+    });
+    const noMatch = [...(sessionData.no_match_services || []), serviceType];
+    const nextIndex = serviceIndex + 1;
+    if (nextIndex < serviceTypes.length) {
+      const nextData = {
+        ...sessionData,
+        service_index: nextIndex,
+        no_match_services: noMatch,
+        provider_candidates: null,
+      };
+      await updateSession(waPhone, { step: 'request_choose_provider', data: nextData });
+      return presentProviderSelection(waPhone, farmer, lat, lng, nextData, updateSession);
+    }
+    await updateSession(waPhone, { step: 'main_menu', data: {} });
+    const msg = buildFarmerSelectionCompleteMessage(sessionData.completed_bookings || [], noMatch);
+    await sendBrandedText(waPhone, msg);
+    return { ok: true, completed: sessionData.completed_bookings || [], noMatchServices: noMatch };
   }
 
-  const sorted = [...recs].sort((a, b) => {
-    if (a.hasAvailability && !b.hasAvailability) return -1;
-    if (!a.hasAvailability && b.hasAvailability) return 1;
-    return b.rankingScore - a.rankingScore;
-  });
+  const nextData = {
+    ...sessionData,
+    service_types: serviceTypes,
+    service_index: serviceIndex,
+    current_service_type: serviceType,
+    provider_candidates: providers,
+    request_pending: {
+      ...requestPending,
+      budget_min_fcfa: budget.min,
+      budget_max_fcfa: budget.max,
+    },
+  };
+  await updateSession(waPhone, { step: 'request_choose_provider', data: nextData });
 
-  const rec = sorted[0];
+  const rows = providers.slice(0, 10).map((p) => ({
+    id: `pick_prov_${p.providerId}`,
+    title: String(p.name).slice(0, 24),
+    description: `${p.farmerPayable.toLocaleString()} FCFA · ★${p.avgRating || '—'} · ${p.distanceDisplay || 'nearby'}`.slice(0, 72),
+  }));
+
+  const list = buildOptionListReply(
+    buildProviderListMessage(serviceType, providers, serviceIndex, serviceTypes.length),
+    rows
+  );
+  await sendBotReply(waPhone, list);
+  return { ok: true, awaiting_selection: true, serviceType };
+}
+
+async function beginProviderSelection(waPhone, farmer, lat, lng, requestPending, sessionExtras, updateSession) {
+  const serviceTypes = serviceTypesFromRequest(requestPending);
+  if (!serviceTypes.length) {
+    return { ok: false, error: 'no_services' };
+  }
+
+  const sessionData = {
+    request_pending: requestPending,
+    farm_gps_lat: lat,
+    farm_gps_lng: lng,
+    service_index: 0,
+    service_types: serviceTypes,
+    completed_bookings: [],
+    no_match_services: [],
+    rejected_provider_ids: sessionExtras.rejected_provider_ids || [],
+  };
+
+  return presentProviderSelection(waPhone, farmer, lat, lng, sessionData, updateSession);
+}
+
+async function farmerSelectProvider(waPhone, farmer, sessionData, providerId, updateSession) {
+  const requestPending = sessionData.request_pending;
+  const serviceType = sessionData.current_service_type;
+  const lat = sessionData.farm_gps_lat;
+  const lng = sessionData.farm_gps_lng;
+  const candidates = sessionData.provider_candidates || [];
+  const rec = candidates.find((p) => p.providerId === providerId);
+  if (!rec || !serviceType) {
+    return { ok: false, error: 'invalid_provider' };
+  }
+
+  const allTypes = serviceTypesFromRequest(requestPending);
+  const budget = perServiceBudget(requestPending, allTypes.length);
   const slot = await pickBestSlot(rec.providerId, requestPending.scheduled_date, requestPending.scheduled_time);
   const scheduledDate = slot ? String(slot.available_date).slice(0, 10) : requestPending.scheduled_date;
   const scheduledTime = slot ? String(slot.start_time).slice(0, 8) : requestPending.scheduled_time;
@@ -184,134 +277,94 @@ async function autoMatchSingleService(farmer, lat, lng, serviceType, requestPend
   );
 
   const provider = { full_name: rec.name, phone: rec.phone };
-  const farmerUser = { full_name: farmer.name, phone: farmer.phone || null };
+  const farmerUser = { full_name: farmer.name, phone: farmer.phone || normalizePhone(waPhone) };
   await notifyProviderBookingRequest(booking, farmerUser, provider);
 
   await logAudit({
     adminId: null,
     adminUsername: 'system',
     actionType: 'matching',
-    action: `Auto-matched ${serviceType} → provider ${rec.name} (booking #${booking.id}, ${rec.farmerPayable.toLocaleString()} FCFA, ${rec.distanceDisplay || 'nearby'})`,
+    action: `Farmer chose ${rec.name} for ${serviceType} (booking #${booking.id}, ${rec.farmerPayable.toLocaleString()} FCFA)`,
     entityType: 'booking',
     entityId: booking.id,
   });
 
-  return {
-    ok: true,
-    serviceType,
-    providerId: rec.providerId,
-    providerName: rec.name,
-    bookingId: booking.id,
-    farmerPayable: rec.farmerPayable,
-    scheduledDate,
-    scheduledTime,
-    booking,
-  };
-}
+  const completed = [
+    ...(sessionData.completed_bookings || []),
+    {
+      serviceType,
+      providerId: rec.providerId,
+      providerName: rec.name,
+      bookingId: booking.id,
+      farmerPayable: rec.farmerPayable,
+      scheduledDate,
+      scheduledTime,
+    },
+  ];
 
-/**
- * Auto-match all requested services — one provider per service when possible.
- * @param {object} updateSession - (waFrom, updates) => Promise
- */
-async function autoMatchServiceRequest(waPhone, farmer, lat, lng, requestPending, sessionExtras, updateSession) {
-  const serviceTypes = serviceTypesFromRequest(requestPending);
-  if (!serviceTypes.length) {
-    return { ok: false, error: 'no_services' };
-  }
+  const serviceTypes = sessionData.service_types || serviceTypesFromRequest(requestPending);
+  const nextIndex = (sessionData.service_index || 0) + 1;
 
-  const usedProviderIds = [...(sessionExtras.rejected_provider_ids || [])];
-  const matches = [];
-  const noMatchServices = [];
-
-  for (const serviceType of serviceTypes) {
-    try {
-      const result = await autoMatchSingleService(
-        { ...farmer, phone: normalizePhone(waPhone) },
-        lat,
-        lng,
-        serviceType,
-        requestPending,
-        usedProviderIds
-      );
-      if (result.ok) {
-        matches.push(result);
-        usedProviderIds.push(result.providerId);
-      } else {
-        await createPendingAdminBooking(farmer.id, requestPending, serviceType);
-        noMatchServices.push(serviceType);
-        await logAudit({
-          adminId: null,
-          adminUsername: 'system',
-          actionType: 'matching',
-          action: `No auto-match for ${serviceType} (farmer #${farmer.id}) — location/budget/service criteria`,
-          entityType: 'booking',
-          entityId: null,
-        });
-      }
-    } catch (err) {
-      console.error(`autoMatchServiceRequest (${serviceType}):`, err.message);
-      await createPendingAdminBooking(farmer.id, requestPending, serviceType).catch(() => {});
-      noMatchServices.push(serviceType);
-    }
+  if (nextIndex < serviceTypes.length) {
+    const nextData = {
+      ...sessionData,
+      service_index: nextIndex,
+      completed_bookings: completed,
+      provider_candidates: null,
+      current_service_type: null,
+    };
+    await updateSession(waPhone, { step: 'request_choose_provider', data: nextData });
+    await sendBrandedText(
+      waPhone,
+      `✅ *${serviceType}* — booking #${booking.id} sent to *${rec.name}*.\n\nNow choose a provider for your next service.`
+    );
+    return presentProviderSelection(waPhone, farmer, lat, lng, nextData, updateSession);
   }
 
   await updateSession(waPhone, { step: 'main_menu', data: {} });
-
-  if (matches.length === 0) {
-    await sendBrandedText(
-      waPhone,
-      '✅ *Request saved.* No providers match your services, budget, or location right now. Admin will assign providers soon.\n\nReply *MENU* for options.'
-    );
-    return { ok: true, no_match: true, matches: [], noMatchServices };
-  }
-
-  await sendBrandedText(waPhone, buildFarmerAutoMatchMessage(matches, noMatchServices));
-  return { ok: true, matches, noMatchServices };
+  const msg = buildFarmerSelectionCompleteMessage(completed, sessionData.no_match_services || []);
+  await sendBrandedText(waPhone, msg);
+  return { ok: true, completed };
 }
 
-/** @deprecated alias — automatic matching replaces manual provider list selection */
-async function beginProviderSelection(waPhone, farmer, lat, lng, requestPending, sessionExtras, updateSession) {
-  return autoMatchServiceRequest(waPhone, farmer, lat, lng, requestPending, sessionExtras, updateSession);
+async function autoMatchServiceRequest(waPhone, farmer, lat, lng, requestPending, sessionExtras, updateSession) {
+  return beginProviderSelection(waPhone, farmer, lat, lng, requestPending, sessionExtras, updateSession);
 }
 
 async function reofferAfterProviderReject(farmerPhone, farmer, requestPending, lat, lng, rejectedIds, updateSession) {
-  const serviceType = requestPending.service_type;
-  const result = await autoMatchSingleService(
+  const sessionData = {
+    request_pending: requestPending,
+    farm_gps_lat: lat,
+    farm_gps_lng: lng,
+    service_index: 0,
+    service_types: [requestPending.service_type],
+    completed_bookings: [],
+    no_match_services: [],
+    rejected_provider_ids: rejectedIds,
+  };
+  await sendBrandedText(
+    farmerPhone,
+    `⚠️ Your provider declined *${requestPending.service_type}*.\n\nPlease choose another provider from the list below.`
+  );
+  await updateSession(farmerPhone, { step: 'request_choose_provider', data: sessionData });
+  return presentProviderSelection(
+    farmerPhone,
     { ...farmer, phone: normalizePhone(farmerPhone) },
     lat,
     lng,
-    serviceType,
-    requestPending,
-    rejectedIds
+    sessionData,
+    updateSession
   );
-
-  if (!result.ok) {
-    await createPendingAdminBooking(farmer.id, requestPending, serviceType);
-    await sendBrandedText(
-      farmerPhone,
-      `⚠️ No other providers are available for *${serviceType}* right now. Admin will assign one soon.\n\nReply *MENU* for options.`
-    );
-    return { ok: true, no_match: true };
-  }
-
-  await sendBrandedText(
-    farmerPhone,
-    `✅ *New match for ${serviceType}*\n\n` +
-      `Provider: *${result.providerName}*\n` +
-      `Booking #${result.bookingId}\n` +
-      `Date: ${result.scheduledDate || 'TBD'} ${result.scheduledTime ? String(result.scheduledTime).slice(0, 5) : ''}\n` +
-      `Est. total: ${result.farmerPayable.toLocaleString()} FCFA\n\n` +
-      'Waiting for the provider to accept. Reply *MENU* for options.'
-  );
-  return { ok: true, match: result };
 }
 
 module.exports = {
-  autoMatchServiceRequest,
-  autoMatchSingleService,
   beginProviderSelection,
+  farmerSelectProvider,
+  presentProviderSelection,
+  autoMatchServiceRequest,
   reofferAfterProviderReject,
   getSlotsNearDate,
   pickBestSlot,
-  buildFarmerAutoMatchMessage,
+  buildFarmerSelectionCompleteMessage,
+  serviceTypesFromRequest,
 };

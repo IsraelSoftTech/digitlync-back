@@ -244,6 +244,101 @@ async function getRecommendedProvidersAtLocation(
     .slice(0, MAX_RECOMMENDATIONS);
 }
 
+/**
+ * List all providers offering a service type (farmer self-selection).
+ * Matching is by service type only — distance and rating are shown as info, not filters.
+ */
+async function getProvidersByServiceType(
+  farmerLat,
+  farmerLng,
+  serviceType,
+  requestedDate,
+  requestedQty,
+  excludeProviderIds = []
+) {
+  const svc = String(serviceType || '').trim();
+  const qty = Number(requestedQty) || 0;
+  const excluded = new Set((excludeProviderIds || []).map((id) => parseInt(id, 10)));
+
+  const providersRes = await pool.query(
+    `SELECT DISTINCT ON (p.id) p.*,
+            ps.id AS ps_id, ps.service_name AS ps_service_name, ps.min_service_qty,
+            ps.base_price_fcfa, ps.base_price_per_ha AS ps_base_price_per_ha,
+            ps.base_duration_days, ps.base_duration_hours,
+            (SELECT ROUND(AVG(fr.rating)::numeric, 1) FROM farmer_ratings fr WHERE fr.provider_id = p.id) AS avg_rating,
+            (SELECT COUNT(DISTINCT fr.id) FROM farmer_ratings fr WHERE fr.provider_id = p.id) AS rating_count
+     FROM providers p
+     LEFT JOIN provider_services ps ON ps.provider_id = p.id AND ps.service_name ILIKE $1
+     WHERE (ps.id IS NOT NULL OR p.services_offered ILIKE $1)
+     ORDER BY p.id, ps.id NULLS LAST`,
+    [`%${svc}%`]
+  );
+
+  const scored = await Promise.all(
+    providersRes.rows.map(async (row) => {
+      if (excluded.has(row.id)) return null;
+
+      const prLat = parseFloat(row.gps_lat);
+      const prLng = parseFloat(row.gps_lng);
+      let distance = null;
+      if (farmerHasGps(farmerLat, farmerLng) && providerHasGps(prLat, prLng)) {
+        distance = haversineDistanceKm(farmerLat, farmerLng, prLat, prLng);
+      }
+
+      const serviceRow = row.ps_id
+        ? {
+            id: row.ps_id,
+            service_name: row.ps_service_name,
+            min_service_qty: row.min_service_qty,
+            base_price_fcfa: row.base_price_fcfa,
+            base_price_per_ha: row.ps_base_price_per_ha,
+            base_duration_days: row.base_duration_days,
+            base_duration_hours: row.base_duration_hours,
+          }
+        : null;
+
+      const econ = economicsForProvider(row, serviceRow, qty);
+      const availability = requestedDate
+        ? await checkAvailability(row.id, requestedDate)
+        : null;
+      const hasAvailability = availability && parseInt(availability.available_days || 0, 10) > 0;
+      const reputation = await calculateReputationScore(row.id);
+
+      let rankingScore = 0;
+      const distanceScore = distance != null ? Math.max(0, 30 - (distance / 20) * 30) : 15;
+      rankingScore += distanceScore;
+      rankingScore += hasAvailability ? 25 : 0;
+      rankingScore += ((parseFloat(row.avg_rating) || 0) / 5) * 25;
+      rankingScore += (reputation.score / 100) * 20;
+
+      return {
+        providerId: row.id,
+        name: row.full_name,
+        phone: row.phone,
+        servicesOffered: row.services_offered,
+        serviceRadiusKm: parseFloat(row.service_radius_km) || DEFAULT_SERVICE_RADIUS_KM,
+        distanceKm: distance != null ? Math.round(distance * 10) / 10 : null,
+        distanceDisplay: formatDistance(distance),
+        avgRating: Math.round((parseFloat(row.avg_rating) || 0) * 10) / 10,
+        ratingCount: row.rating_count || 0,
+        reputation,
+        hasAvailability,
+        providerAmount: econ.providerBaseAmount,
+        platformFee: econ.platformFeeAmount,
+        farmerPayable: econ.farmerPayableAmount,
+        providerServiceId: econ.providerServiceId,
+        estimatedDurationDays: econ.estimatedDurationDays,
+        estimatedDurationHours: econ.estimatedDurationHours,
+        rankingScore,
+      };
+    })
+  );
+
+  return scored
+    .filter(Boolean)
+    .sort((a, b) => b.rankingScore - a.rankingScore);
+}
+
 async function getRecommendedProviders(
   farmerId,
   serviceType,
@@ -288,6 +383,7 @@ async function getProviderAvailableSlots(providerId, date) {
 module.exports = {
   getRecommendedProviders,
   getRecommendedProvidersAtLocation,
+  getProvidersByServiceType,
   getProviderAvailableSlots,
   calculateReputationScore,
   checkAvailability,

@@ -1,6 +1,10 @@
 const express = require('express');
 const { requireAdmin } = require('../middleware/admin-auth');
-const { getPlatformSettings, updatePlatformSettings } = require('../services/platform-settings');
+const {
+  getPlatformSettings,
+  updatePlatformSettings,
+  updateMaintenanceSignal,
+} = require('../services/platform-settings');
 const { logAudit, getAdminFromRequest } = require('../services/audit-log');
 
 const router = express.Router();
@@ -38,6 +42,44 @@ router.put('/', requireAdmin, async (req, res) => {
   } catch (err) {
     console.error('Settings update error:', err);
     res.status(500).json({ error: 'Failed to save settings' });
+  }
+});
+
+router.get('/maintenance', requireAdmin, async (req, res) => {
+  try {
+    const settings = await getPlatformSettings();
+    res.json({ maintenanceSignalEnabled: Boolean(settings.maintenanceSignalEnabled) });
+  } catch (err) {
+    console.error('Maintenance settings get error:', err);
+    res.status(500).json({ error: 'Failed to load maintenance settings' });
+  }
+});
+
+router.put('/maintenance', requireAdmin, async (req, res) => {
+  const { maintenanceSignalEnabled } = req.body || {};
+  if (typeof maintenanceSignalEnabled !== 'boolean') {
+    return res.status(400).json({ error: 'maintenanceSignalEnabled (boolean) is required' });
+  }
+  try {
+    const result = await updateMaintenanceSignal(maintenanceSignalEnabled, req.admin.id);
+    if (!result.ok) {
+      return res.status(400).json({ error: result.error || 'Update failed' });
+    }
+    const { adminId, adminUsername } = getAdminFromRequest(req);
+    await logAudit({
+      adminId,
+      adminUsername,
+      actionType: 'data_edit',
+      action: maintenanceSignalEnabled
+        ? 'Enabled maintenance signal banner'
+        : 'Disabled maintenance signal banner',
+      entityType: 'settings',
+      entityId: 1,
+    });
+    res.json({ success: true, maintenanceSignalEnabled: result.maintenanceSignalEnabled });
+  } catch (err) {
+    console.error('Maintenance settings update error:', err);
+    res.status(500).json({ error: 'Failed to save maintenance settings' });
   }
 });
 

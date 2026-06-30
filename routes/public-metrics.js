@@ -5,6 +5,18 @@
 const express = require('express');
 const router = express.Router();
 const { pool } = require('../config/db');
+const { getMaintenanceSignalEnabled } = require('../services/platform-settings');
+
+// GET /api/public/maintenance - whether site-wide maintenance banner is active
+router.get('/maintenance', async (req, res) => {
+  try {
+    const signalEnabled = await getMaintenanceSignalEnabled();
+    res.json({ maintenanceSignalEnabled: signalEnabled });
+  } catch (err) {
+    console.error('Public maintenance status error:', err);
+    res.json({ maintenanceSignalEnabled: false });
+  }
+});
 
 // GET /api/public/metrics - platform stats for public landing page
 router.get('/metrics', async (req, res) => {

@@ -74,13 +74,15 @@ Status: Payment HELD in Digilync escrow
 • Incomplete work may result in dispute
 • Reliability affects your future recommendations
 
-🚜 On service day, reply:
-*START ${bookingId}* — when you begin work
-*END ${bookingId}* — when the job is 100% complete
+🚜 When the farmer has paid to escrow, reply *MENU* and select *START/END Job*:
 
-Optional: *PAUSE ${bookingId}* / *RESUME ${bookingId}* during work.
+Enter *1* to START job
+Enter *2* to PAUSE job (during work)
+Enter *3* to END job (when 100% complete)
 
-Reply *4* (My Jobs) anytime to see active bookings.`;
+The farmer is notified at each step. Payment is released after the farmer confirms completion.
+
+Reply *4* (My Requests) anytime to see active bookings.`;
 
   try {
     await sendBrandedText(provider.phone, message);

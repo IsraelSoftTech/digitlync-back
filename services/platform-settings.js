@@ -5,6 +5,7 @@ const DEFAULT_SETTINGS = {
   reminderTiming: 24,
   maxServiceRadius: 50,
   minRating: 3.0,
+  maintenanceSignalEnabled: false,
 };
 
 function rowToSettings(row) {
@@ -14,6 +15,7 @@ function rowToSettings(row) {
     reminderTiming: row.reminder_timing_hours,
     maxServiceRadius: row.max_service_radius_km,
     minRating: parseFloat(row.min_rating),
+    maintenanceSignalEnabled: Boolean(row.maintenance_signal_enabled),
   };
 }
 
@@ -31,6 +33,10 @@ async function ensurePlatformSettingsSchema() {
   `);
   await pool.query(`
     INSERT INTO platform_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING
+  `);
+  await pool.query(`
+    ALTER TABLE platform_settings
+    ADD COLUMN IF NOT EXISTS maintenance_signal_enabled BOOLEAN NOT NULL DEFAULT FALSE
   `);
 }
 
@@ -70,9 +76,30 @@ async function updatePlatformSettings(updates, adminId) {
   return { ok: true, settings: rowToSettings(result.rows[0]) };
 }
 
+async function updateMaintenanceSignal(enabled, adminId) {
+  const signalEnabled = Boolean(enabled);
+  const result = await pool.query(
+    `UPDATE platform_settings
+     SET maintenance_signal_enabled = $1,
+         updated_at = CURRENT_TIMESTAMP,
+         updated_by_admin_id = $2
+     WHERE id = 1
+     RETURNING *`,
+    [signalEnabled, adminId || null]
+  );
+  return { ok: true, maintenanceSignalEnabled: Boolean(result.rows[0]?.maintenance_signal_enabled) };
+}
+
+async function getMaintenanceSignalEnabled() {
+  const settings = await getPlatformSettings();
+  return Boolean(settings.maintenanceSignalEnabled);
+}
+
 module.exports = {
   DEFAULT_SETTINGS,
   ensurePlatformSettingsSchema,
   getPlatformSettings,
   updatePlatformSettings,
+  updateMaintenanceSignal,
+  getMaintenanceSignalEnabled,
 };

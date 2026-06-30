@@ -203,8 +203,8 @@ async function providerAcceptBooking(bookingId, providerId) {
     `Service: ${booking.service_type}\n` +
     `Date: ${booking.scheduled_date || 'TBD'} ${booking.scheduled_time || ''}\n` +
     `Farmer pays: ${roundMoney(booking.farmer_payable_amount_fcfa).toLocaleString()} FCFA\n\n` +
-    'The farmer will pay to escrow next. Payment is released only after the farmer confirms 100% completion. ' +
-    'Partial jobs are not eligible for payout.\n\n' +
+    'The farmer has been notified to pay to escrow.\n' +
+    'Reply *MENU* and select *START/END Job* once payment is confirmed to START, PAUSE, or END the job.\n\n' +
     'Reply *MENU* for options.';
   await sendBrandedText(provider.phone, acceptMsg).catch((e) =>
     console.error('providerAccept notify:', e.message)

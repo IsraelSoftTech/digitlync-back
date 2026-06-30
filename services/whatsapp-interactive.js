@@ -64,6 +64,8 @@ function normalizeUserChoice(raw) {
   if (lower === 'yes') return '1';
   if (lower === 'no') return '2';
 
+  if (lower === 'main_job') return 'job_menu';
+
   const patterns = [
     /^main_(\d+)$/i,
     /^opt_(\d+)$/i,
@@ -75,6 +77,7 @@ function normalizeUserChoice(raw) {
     /^confirm_(\d+)$/i,
     /^job_(\d+)$/i,
     /^pick_prov_(\d+)$/i,
+    /^jobctl_(\d+)$/i,
     /^rate_(\d+)$/i,
     /^slot_(\d+)$/i,
   ];
@@ -84,6 +87,7 @@ function normalizeUserChoice(raw) {
       if (re.source.startsWith('^job_')) return `job_${m[1]}`;
       if (re.source.startsWith('^rate_')) return `rate_${m[1]}`;
       if (re.source.startsWith('^pick_prov_')) return `pick_prov_${m[1]}`;
+      if (re.source.startsWith('^jobctl_')) return `jobctl_${m[1]}`;
       if (re.source.startsWith('^slot_')) return `slot_${m[1]}`;
       return m[1];
     }
