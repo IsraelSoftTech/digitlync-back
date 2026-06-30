@@ -99,14 +99,15 @@ async function recordProviderJobEvent(bookingId, providerId, eventType, note = n
       [bookingId, providerId, normalized, note]
     );
     const newStatus = EVENT_TO_STATUS[normalized];
+    const markCompleted = newStatus === 'awaiting_farmer_confirmation';
     const updated = await client.query(
       `UPDATE bookings
        SET status = $1,
            updated_at = CURRENT_TIMESTAMP,
-           completed_at = CASE WHEN $1 = 'awaiting_farmer_confirmation' THEN CURRENT_TIMESTAMP ELSE completed_at END
-       WHERE id = $2
+           completed_at = CASE WHEN $2 THEN CURRENT_TIMESTAMP ELSE completed_at END
+       WHERE id = $3
        RETURNING *`,
-      [newStatus, bookingId]
+      [newStatus, markCompleted, bookingId]
     );
     await client.query('COMMIT');
 
@@ -152,7 +153,7 @@ async function recordProviderJobEvent(bookingId, providerId, eventType, note = n
       operationalSchemaReady = false;
       return { ok: false, error: 'schema' };
     }
-    throw err;
+    return { ok: false, error: 'db_error', detail: err.message };
   } finally {
     client.release();
   }
@@ -172,6 +173,9 @@ function providerJobErrorMessage(result) {
       return 'Invalid job command. Reply *4* for your jobs.';
     case 'schema':
       return 'Job tracking is being set up. Please send *START* again in a few seconds.';
+    case 'db_error':
+      console.error('[JobEvent] DB error:', result.detail);
+      return 'Could not update the job right now. Please try again in a moment. Reply *4* for your jobs.';
     default:
       return 'Something went wrong. Reply *4* to try again.';
   }

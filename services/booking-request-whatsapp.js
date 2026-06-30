@@ -207,9 +207,17 @@ async function presentProviderSelection(waPhone, farmer, lat, lng, sessionData, 
     description: `${p.farmerPayable.toLocaleString()} FCFA · ★${p.avgRating || '—'} · ${p.distanceDisplay || 'nearby'}`.slice(0, 72),
   }));
 
+  const summary = buildProviderListMessage(serviceType, providers, serviceIndex, serviceTypes.length);
   const list = buildOptionListReply(
-    buildProviderListMessage(serviceType, providers, serviceIndex, serviceTypes.length),
+    'Select your preferred provider from the list below.',
     rows
+  );
+
+  await sendBrandedText(
+    waPhone,
+    `${summary}\n\n` +
+      '👉 Tap *Select an option* on the next message to choose.\n' +
+      'Or reply with the provider number (e.g. *1* or *2*).'
   );
   await sendBotReply(waPhone, list);
   return { ok: true, awaiting_selection: true, serviceType };

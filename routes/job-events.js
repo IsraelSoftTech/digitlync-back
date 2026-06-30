@@ -66,13 +66,14 @@ router.post('/booking/:bookingId', async (req, res) => {
       [req.params.bookingId, actor_type || 'provider', actor_id || null, event_type, note || null]
     );
     const newStatus = EVENT_TO_STATUS[event_type];
+    const markCompleted = newStatus === 'awaiting_farmer_confirmation';
     const updated = await client.query(
       `UPDATE bookings
        SET status = $1, updated_at = CURRENT_TIMESTAMP,
-           completed_at = CASE WHEN $1 = 'awaiting_farmer_confirmation' THEN CURRENT_TIMESTAMP ELSE completed_at END
-       WHERE id = $2
+           completed_at = CASE WHEN $2 THEN CURRENT_TIMESTAMP ELSE completed_at END
+       WHERE id = $3
        RETURNING *`,
-      [newStatus, req.params.bookingId]
+      [newStatus, markCompleted, req.params.bookingId]
     );
     await client.query('COMMIT');
 
