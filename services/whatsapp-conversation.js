@@ -164,9 +164,10 @@ async function insertFarmerFullFromPending(waPhone, pending) {
     }
     await updateSession(waPhone, { step: 'main_menu', user_type: 'unknown', data: {} });
     const existing = await findExistingUser(phoneCanonical);
+    const menuRows = await getMainMenuRows(existing);
     await sendBotReply(
       `whatsapp:${digits}`,
-      buildOptionListReply('✅ Registration successful! Choose your next step below.', getMainMenuRows(existing))
+      buildOptionListReply('✅ Registration successful! Choose your next step below.', menuRows)
     );
     return { ok: true, farmer_id: farmerId };
   } catch (err) {
