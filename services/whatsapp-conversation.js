@@ -7,8 +7,10 @@ const { pool } = require('../config/db');
 const { sendBrandedText } = require('./whatsapp-sender');
 const {
   buildOptionListReply,
-  buildServiceRows,
+  buildServiceListReply,
   normalizeUserChoice,
+  isStaleListTap,
+  getStaleListHint,
   sendBotReply,
 } = require('./whatsapp-interactive');
 const { validateSchedulingWindow } = require('./operational-core');
@@ -59,11 +61,13 @@ async function getSession(waPhone) {
 
 async function updateSession(waFrom, updates) {
   const phone = normalizePhone(waFrom);
+  await getSession(waFrom);
   const { user_type, step, data } = updates;
-  const dataJson = typeof data === 'object' ? JSON.stringify(data) : (data || '{}');
+  const dataJson =
+    data === undefined ? null : typeof data === 'object' ? JSON.stringify(data) : data || '{}';
   await pool.query(
     `UPDATE whatsapp_sessions SET user_type = COALESCE($1, user_type), step = COALESCE($2, step), data = COALESCE($3::jsonb, data), updated_at = CURRENT_TIMESTAMP WHERE wa_phone = $4`,
-    [user_type || null, step || null, dataJson, phone]
+    [user_type ?? null, step ?? null, dataJson, phone]
   );
 }
 
@@ -163,17 +167,20 @@ async function insertFarmerFullFromPending(waPhone, pending) {
       );
     }
     await updateSession(waPhone, { step: 'main_menu', user_type: 'unknown', data: {} });
-    const existing = await findExistingUser(phoneCanonical);
-    const menuRows = await getMainMenuRows(existing);
-    await sendBotReply(
-      `whatsapp:${digits}`,
-      buildOptionListReply('✅ Registration successful! Choose your next step below.', menuRows)
-    );
-    return { ok: true, farmer_id: farmerId };
+    return { ok: true, farmer_id: farmerId, phone_digits: digits };
   } catch (err) {
     console.error('insertFarmerFullFromPending:', err);
     return { ok: false, error: 'db' };
   }
+}
+
+async function sendFarmerRegistrationSuccessMenu(waPhone, phoneDigits) {
+  const existing = await findExistingUser(normalizePhone(waPhone));
+  const menuRows = await getMainMenuRows(existing);
+  await sendBotReply(
+    `whatsapp:${phoneDigits}`,
+    buildOptionListReply('✅ Registration successful! Choose your next step below.', menuRows)
+  );
 }
 
 /**
@@ -294,13 +301,15 @@ async function finalizeProviderRegistrationFromPendingGps(waPhone, pending, lat,
       user_type: 'unknown',
       data: { privacy_pending: { role: 'provider', id: providerId } },
     });
-    const to = `whatsapp:${digits}`;
-    await sendBotReply(to, getPrivacyConsentPostRegisterMessage());
-    return { ok: true, provider_id: providerId };
+    return { ok: true, provider_id: providerId, phone_digits: digits };
   } catch (err) {
     console.error('finalizeProviderRegistrationFromPendingGps:', err);
     return { ok: false, error: 'db' };
   }
+}
+
+async function sendProviderPrivacyConsentPrompt(waPhone, phoneDigits) {
+  await sendBotReply(`whatsapp:${phoneDigits}`, getPrivacyConsentPostRegisterMessage());
 }
 
 async function applyServiceRequestGpsFromWeb(waPhone, lat, lng) {
@@ -652,7 +661,8 @@ function getRequestSelectFarmMessage(farms) {
 
 async function handleIncoming(waFrom, body, latitude, longitude, profileName) {
   const phone = normalizePhone(waFrom);
-  const text = normalizeUserChoice((body || '').trim());
+  const rawBody = (body || '').trim();
+  const text = normalizeUserChoice(rawBody);
   const textLower = text.toLowerCase();
   const existing = await findExistingUser(phone);
   const session = await getSession(waFrom);
@@ -763,6 +773,10 @@ async function handleIncoming(waFrom, body, latitude, longitude, profileName) {
   }
   if (session.step === 'provider_job_action' && existing?.type === 'provider') {
     return handleProviderJobActionInput(waFrom, existing, text, data);
+  }
+
+  if (inActiveFlow && isStaleListTap(rawBody, session.step)) {
+    return getStaleListHint();
   }
 
   if (['help', '?'].includes(textLower)) {
@@ -920,7 +934,7 @@ async function handleIncoming(waFrom, body, latitude, longitude, profileName) {
     return handleProviderFlow(waFrom, session, data, text, latitude, longitude);
   }
   if (session.step && session.step.startsWith('request_')) {
-    return handleRequestFlow(waFrom, session, data, text, latitude, longitude, existing);
+    return handleRequestFlow(waFrom, session, data, text, rawBody, latitude, longitude, existing);
   }
 
   // Farmer quick reply after provider ends job (notification asks 1 or 2)
@@ -1116,9 +1130,23 @@ async function handleFarmerFlow(waFrom, session, data, text, latitude, longitude
     case 'farmer_confirm_registration': {
       if (text === '1' || text.toLowerCase() === 'confirm') {
         const r = await insertFarmerFullFromPending(phone, data.pending_farmer);
-        if (r.ok) return null;
+        if (r.ok) {
+          try {
+            await sendFarmerRegistrationSuccessMenu(phone, r.phone_digits);
+          } catch (sendErr) {
+            console.error('sendFarmerRegistrationSuccessMenu:', sendErr);
+            return '✅ Registration saved! Reply *MENU* for options.';
+          }
+          return null;
+        }
         if (r.error === 'duplicate') {
           return 'This WhatsApp number is already registered as a farmer. Reply *MENU* for options.';
+        }
+        if (r.error === 'invalid_coords') {
+          return 'Farm GPS is missing or invalid. Reply *MENU* and register again with the GPS link.';
+        }
+        if (r.error === 'no_farms') {
+          return 'No farm details found. Reply *MENU* to start registration again.';
         }
         return 'Registration could not be completed. Reply *MENU* to try again.';
       }
@@ -1277,9 +1305,9 @@ function getRequestInputMessage(data = {}) {
     description += '\n\nAfter selecting, reply with:\n*Farm size:* <hectares>';
   }
   description += `\n\n${followUp}`;
-  return buildOptionListReply(description, buildServiceRows());
+  return buildServiceListReply(description, { page: data.service_list_page || 1 });
 }
-async function handleRequestFlow(waFrom, session, data, text, latitude, longitude, existing) {
+async function handleRequestFlow(waFrom, session, data, text, rawBody, latitude, longitude, existing) {
   if (!existing || existing.type !== 'farmer') {
     await updateSession(waFrom, { step: 'main_menu', data: {} });
     return getMainMenu();
@@ -1314,9 +1342,22 @@ async function handleRequestFlow(waFrom, session, data, text, latitude, longitud
     }
 
     case 'request_input': {
+      if (/^svc_page_2$/i.test(rawBody)) {
+        return buildServiceListReply(
+          '*Request a service* — page 2 of 2\n\nChoose services (comma-separated numbers, e.g. *9,12*).',
+          { page: 2 }
+        );
+      }
+      if (/^svc_page_1$/i.test(rawBody)) {
+        return getRequestInputMessage({ ...data, service_list_page: 1 });
+      }
       const kv = parseKeyValueBlock(text);
-      // Accept comma-separated service numbers (e.g. "1,3,10") or a single number
-      const rawServices = (kv.service || kv.services || text || '').trim();
+      const svcFromList = String(rawBody || '').match(/^svc_(\d+)$/i);
+      const serviceSource = svcFromList
+        ? svcFromList[1]
+        : (kv.service || kv.services || text || '').trim();
+      // Accept comma-separated service numbers (e.g. "1,3,10") or a single number / svc_N list id
+      const rawServices = serviceSource;
       const nums = Array.from(new Set((rawServices.match(/\d+/g) || []).map((n) => parseInt(n, 10))))
         .filter((n) => !Number.isNaN(n) && n >= 1 && n <= SERVICE_LIST.length);
       const farmSizeRaw = parseFloat(kv.farm_size || '');
@@ -1559,7 +1600,15 @@ async function handleProviderFlow(waFrom, session, data, text, latitude, longitu
         return 'Invalid coordinates.\n\n' + getProviderAwaitGpsWebMessage(gpsUrl);
       }
       const r = await finalizeProviderRegistrationFromPendingGps(phone, pending, gpsLat, gpsLng, { source: 'whatsapp' });
-      if (r.ok) return null;
+      if (r.ok) {
+        try {
+          await sendProviderPrivacyConsentPrompt(phone, r.phone_digits);
+        } catch (sendErr) {
+          console.error('sendProviderPrivacyConsentPrompt:', sendErr);
+          return '✅ Provider profile saved! Reply *1* to agree to privacy terms or *MENU*.';
+        }
+        return null;
+      }
       if (r.error === 'duplicate') {
         return 'This WhatsApp number is already registered as a provider. Reply *MENU* for options.';
       }
@@ -2482,4 +2531,6 @@ module.exports = {
   applyFarmerGpsCapture,
   applyServiceRequestGpsFromWeb,
   insertFarmerFullFromPending,
+  sendFarmerRegistrationSuccessMenu,
+  sendProviderPrivacyConsentPrompt,
 };

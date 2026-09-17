@@ -9,6 +9,8 @@ const LIST_HEADER = 'Welcome to Digilync';
 const DIGILYNC_TAGLINE =
   'DigiLync connects farmers with trusted agricultural service providers across Cameroon.';
 const LIST_BUTTON = 'Select an option';
+/** Meta WhatsApp list: max 10 rows per message */
+const MAX_LIST_ROWS_TOTAL = 10;
 
 const SERVICE_LIST = [
   'Ploughing', 'Planting', 'Spraying', 'Irrigation', 'Harvesting',
@@ -47,6 +49,84 @@ function buildServiceRows(prefix = 'svc') {
     title: name,
     description: `Service option ${i + 1}`,
   }));
+}
+
+/**
+ * Paginated service picker (15 services > Meta 10-row cap).
+ * Page 1: services 1–8 + "More services"; page 2: 9–15 + "Earlier services".
+ */
+function buildServiceListReply(description, opts = {}) {
+  const page = opts.page === 2 ? 2 : 1;
+  const prefix = opts.prefix || 'svc';
+  const all = buildServiceRows(prefix);
+  let rows;
+  if (page === 1) {
+    rows = [
+      ...all.slice(0, 8),
+      { id: `${prefix}_page_2`, title: 'More services', description: 'Vaccination, livestock & more' },
+    ];
+  } else {
+    rows = [
+      { id: `${prefix}_page_1`, title: 'Earlier services', description: 'Ploughing through Transport' },
+      ...all.slice(8),
+    ];
+  }
+  return buildOptionListReply(description, rows.slice(0, MAX_LIST_ROWS_TOTAL));
+}
+
+function matchListId(raw, prefix) {
+  const p = String(prefix || '').trim();
+  if (!p) return null;
+  const m = String(raw || '').trim().match(new RegExp(`^${p}_(.+)$`, 'i'));
+  return m ? m[1] : null;
+}
+
+function isPrefixedListId(raw) {
+  const t = String(raw || '').trim();
+  if (!t) return false;
+  return /^(main|opt|svc|farm|recap|privacy|prov|confirm|job|pick_prov|jobctl|rate|slot|accept|reject|start|end|pause|resume)_/i.test(t);
+}
+
+/** Prefixes valid for the current WhatsApp session step (prevents stale list taps). */
+const LIST_PREFIXES_BY_STEP = {
+  farmer_multi_prompt: ['opt'],
+  farmer_confirm_registration: ['confirm'],
+  unsubscribe_confirm: ['opt'],
+  request_select_farm: ['farm'],
+  request_input: ['svc'],
+  request_choose_provider: ['pick_prov'],
+  recap_options: ['recap'],
+  privacy_consent_new: ['privacy'],
+  confirm_job_select: ['job'],
+  provider_job_select: ['jobctl'],
+  rating_select: ['rate'],
+};
+
+function listIdPrefix(raw) {
+  const m = String(raw || '').trim().match(/^([a-z]+)_/i);
+  return m ? m[1].toLowerCase() : null;
+}
+
+function isStaleListTap(rawBody, step) {
+  if (!rawBody || !step) return false;
+  const raw = String(rawBody).trim();
+  if (!isPrefixedListId(raw)) return false;
+  const prefix = listIdPrefix(raw);
+  if (!prefix) return false;
+  if (prefix === 'accept' || prefix === 'reject' || prefix === 'start' || prefix === 'end' || prefix === 'pause' || prefix === 'resume') {
+    return false;
+  }
+  const allowed = LIST_PREFIXES_BY_STEP[step];
+  if (!allowed) return true;
+  if (allowed.includes(prefix)) {
+    if (step === 'request_input' && /^svc_page_\d+$/i.test(raw)) return false;
+    return false;
+  }
+  return true;
+}
+
+function getStaleListHint() {
+  return 'That option was from an earlier message. Please use the latest menu above, or reply *MENU* to start over.';
 }
 
 /**
@@ -131,9 +211,15 @@ module.exports = {
   LIST_HEADER,
   DIGILYNC_TAGLINE,
   LIST_BUTTON,
+  MAX_LIST_ROWS_TOTAL,
   SERVICE_LIST,
   buildOptionListReply,
   buildServiceRows,
+  buildServiceListReply,
+  matchListId,
+  isPrefixedListId,
+  isStaleListTap,
+  getStaleListHint,
   normalizeUserChoice,
   isListReply,
   sendBotReply,

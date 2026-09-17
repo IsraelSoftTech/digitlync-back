@@ -13,6 +13,8 @@ const {
   finalizeProviderRegistrationFromPendingGps,
   applyFarmerGpsCapture,
   applyServiceRequestGpsFromWeb,
+  sendFarmerRegistrationSuccessMenu,
+  sendProviderPrivacyConsentPrompt,
 } = require('../services/whatsapp-conversation');
 
 router.post('/farmer-register-gps', async (req, res) => {
@@ -69,6 +71,12 @@ router.post('/farmer-register-gps', async (req, res) => {
       return res.status(500).json({ error: 'Could not save registration. Please try again.' });
     }
 
+    try {
+      await sendFarmerRegistrationSuccessMenu(waPhone, result.phone_digits);
+    } catch (sendErr) {
+      console.error('farmer-register-gps success message:', sendErr);
+    }
+
     res.json({ success: true, farmer_id: result.farmer_id });
   } catch (err) {
     console.error('farmer-register-gps error:', err);
@@ -118,6 +126,12 @@ router.post('/provider-register-gps', async (req, res) => {
         return res.status(409).json({ error: 'This WhatsApp number is already registered as a provider.' });
       }
       return res.status(500).json({ error: 'Could not save registration. Please try again.' });
+    }
+
+    try {
+      await sendProviderPrivacyConsentPrompt(waPhone, result.phone_digits);
+    } catch (sendErr) {
+      console.error('provider-register-gps privacy prompt:', sendErr);
     }
 
     res.json({ success: true, provider_id: result.provider_id });

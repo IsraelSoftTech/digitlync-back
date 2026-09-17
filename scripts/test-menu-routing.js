@@ -53,20 +53,26 @@ function testServiceListMetaLimits() {
 }
 
 async function testWithDb() {
-  const { handleIncoming, getSession, updateSession } = require('../services/whatsapp-conversation');
+  const { pool } = require('../config/db');
+  const { handleIncoming, updateSession } = require('../services/whatsapp-conversation');
   const from = `whatsapp:+2376999${String(Date.now()).slice(-5)}`;
+  const phone = from.replace(/^whatsapp:/i, '');
+  const farmerIns = await pool.query(
+    `INSERT INTO farmers (full_name, phone, farm_size_ha, gps_lat, gps_lng)
+     VALUES ('Routing Test Farmer', $1, 2.5, 4.6, 9.4) RETURNING id`,
+    [phone]
+  );
+  const farmerId = farmerIns.rows[0].id;
 
   await updateSession(from, {
     step: 'request_input',
-    data: { farmer_id: 1, farm_size_ha: 2.5, farm_gps_lat: 4.6, farm_gps_lng: 9.4 },
+    data: { farmer_id: farmerId, farm_size_ha: 2.5, farm_gps_lat: 4.6, farm_gps_lng: 9.4 },
   });
 
-  const unsubReply = await handleIncoming(from, 'main_6', null, null, 'Test');
-  const unsubText = typeof unsubReply === 'object' ? JSON.stringify(unsubReply) : String(unsubReply);
-  assert(/sure|unsubscribe|remove|delete/i.test(unsubText), `main_6 → unsubscribe, got: ${unsubText.slice(0, 80)}`);
-  const sessAfterUnsub = await getSession(from);
-  assert(sessAfterUnsub.step === 'unsubscribe_confirm', `expected unsubscribe_confirm, got ${sessAfterUnsub.step}`);
-  console.log('OK main_6 during request_input → unsubscribe');
+  const staleMainReply = await handleIncoming(from, 'main_6', null, null, 'Test');
+  const staleMainText = typeof staleMainReply === 'object' ? JSON.stringify(staleMainReply) : String(staleMainReply);
+  assert(/earlier message|MENU/i.test(staleMainText), `main_6 → stale hint, got: ${staleMainText.slice(0, 80)}`);
+  console.log('OK main_6 during request_input → stale list hint');
 
   await updateSession(from, {
     step: 'request_input',
@@ -74,7 +80,8 @@ async function testWithDb() {
   });
 
   const procReply = await handleIncoming(from, 'svc_6', null, null, 'Test');
-  assert(/Processing/i.test(String(procReply)), `svc_6 → Processing, got: ${String(procReply).slice(0, 80)}`);
+  const procText = typeof procReply === 'object' ? JSON.stringify(procReply) : String(procReply);
+  assert(/Processing/i.test(procText), `svc_6 → Processing, got: ${procText.slice(0, 80)}`);
   console.log('OK svc_6 during request_input → Processing');
 
   await updateSession(from, {
@@ -91,10 +98,12 @@ async function testWithDb() {
     data: { farmer_id: 1, farm_size_ha: 2.5 },
   });
 
-  const recapReply = await handleIncoming(from, 'recap_2', null, null, 'Test');
-  const recapText = typeof recapReply === 'object' ? JSON.stringify(recapReply) : String(recapReply);
-  assert(/farm|update|edit/i.test(recapText), `recap_2 → edit farm, got: ${recapText.slice(0, 80)}`);
-  console.log('OK recap_2 during request_input → edit farm flow');
+  const staleRecapReply = await handleIncoming(from, 'recap_2', null, null, 'Test');
+  const staleRecapText = typeof staleRecapReply === 'object' ? JSON.stringify(staleRecapReply) : String(staleRecapReply);
+  assert(/earlier message|MENU/i.test(staleRecapText), `recap_2 → stale hint, got: ${staleRecapText.slice(0, 80)}`);
+  console.log('OK recap_2 during request_input → stale list hint');
+
+  await pool.query('DELETE FROM farmers WHERE id = $1', [farmerId]);
 }
 
 async function run() {
