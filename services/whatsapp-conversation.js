@@ -409,7 +409,14 @@ async function getMainMenu(existing = null) {
 
 /** Base URL for web app links (GPS capture page). Uses FRONTEND_URL from .env (same as CORS). */
 function getFrontendBaseUrl() {
-  const u = process.env.FRONTEND_URL || 'https://digilync.net';
+  let u = process.env.FRONTEND_URL || 'https://digilync.net';
+  if (/localhost|127\.0\.0\.1/i.test(u)) {
+    const prodDefault = 'https://digilync.net';
+    if (process.env.NODE_ENV === 'production' || process.env.BACKEND_URL?.includes('digilync.net')) {
+      console.warn('[WhatsApp] FRONTEND_URL is localhost but server looks like production — using', prodDefault);
+      u = prodDefault;
+    }
+  }
   return String(u).replace(/\/$/, '');
 }
 
