@@ -65,6 +65,8 @@ app.get('/api/health', async (req, res) => {
     db,
     whatsapp,
     env: process.env.NODE_ENV || 'development',
+    cors_origins: allowedOrigins.length,
+    frontend_url: process.env.PUBLIC_FRONTEND_URL || process.env.FRONTEND_URL || null,
   });
 });
 

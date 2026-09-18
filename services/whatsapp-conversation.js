@@ -407,17 +407,19 @@ async function getMainMenu(existing = null) {
   return buildOptionListReply('What would you like to do today?', rows);
 }
 
-/** Base URL for web app links (GPS capture page). Uses FRONTEND_URL from .env (same as CORS). */
+/** Base URL for WhatsApp GPS / web deep links — must never be localhost on a live bot. */
 function getFrontendBaseUrl() {
-  let u = process.env.FRONTEND_URL || 'https://digilync.net';
-  if (/localhost|127\.0\.0\.1/i.test(u)) {
-    const prodDefault = 'https://digilync.net';
-    if (process.env.NODE_ENV === 'production' || process.env.BACKEND_URL?.includes('digilync.net')) {
-      console.warn('[WhatsApp] FRONTEND_URL is localhost but server looks like production — using', prodDefault);
-      u = prodDefault;
-    }
-  }
-  return String(u).replace(/\/$/, '');
+  const publicUrl = String(process.env.PUBLIC_FRONTEND_URL || '').trim().replace(/\/$/, '');
+  if (publicUrl && !/localhost|127\.0\.0\.1/i.test(publicUrl)) return publicUrl;
+
+  const configured = String(process.env.FRONTEND_URL || '')
+    .split(',')[0]
+    .trim()
+    .replace(/\/$/, '');
+  if (configured && !/localhost|127\.0\.0\.1/i.test(configured)) return configured;
+
+  // Fallback: reachable on farmer phones (www matches live site)
+  return 'https://www.digilync.net';
 }
 
 function getFarmerBasicMessage() {
