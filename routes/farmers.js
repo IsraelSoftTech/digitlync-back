@@ -145,7 +145,7 @@ router.post('/', async (req, res) => {
         bank_account_access, mobile_money_access, seasonal_revenue, existing_loans, cooperative_membership, current_buyers, storage_method, post_harvest_loss_percent,
         land_ownership, years_farming, access_to_tractor_services, access_to_labour, storage_capacity, mechanization_level,
         geo_tagged_farm_photos, national_id, next_of_kin, consent_to_data_use)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43)
        RETURNING *`,
       [f.full_name, f.phone, f.country, f.region, f.division, f.subdivision, f.district, f.village, f.location, f.gps_lat, f.gps_lng, f.farm_size_ha, f.crop_type, f.service_needs, f.notes,
         f.number_of_plots, f.soil_type, f.irrigation_type, f.planting_season, f.expected_harvest_month, f.estimated_yield_per_ha, f.previous_yield, f.seed_variety, f.fertilizer_use, f.pest_disease_challenges,
