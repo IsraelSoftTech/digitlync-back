@@ -241,6 +241,23 @@ Check admin dashboard for details.`;
   }
 }
 
+/**
+ * Notify a newly added farmer or provider on WhatsApp after admin create.
+ * Failures are logged only — they must not block the admin save.
+ */
+async function sendAdminAddedAccountNotice({ role, fullName, phone }) {
+  const kind = role === 'provider' ? 'provider' : 'farmer';
+  const name = String(fullName || '').trim() || 'You';
+  const to = String(phone || '').trim();
+  if (!to) return;
+  const body = `${name} has been added as a ${kind}.`;
+  try {
+    await sendBrandedText(to, body);
+  } catch (err) {
+    console.error('[Notifications] Admin-added account notice failed:', err.message);
+  }
+}
+
 module.exports = {
   logNotification,
   sendBookingConfirmationToFarmer,
@@ -251,4 +268,5 @@ module.exports = {
   sendBookingReminderToFarmer,
   sendBookingReminderToProvider,
   sendDisputeNotificationToAdmin,
+  sendAdminAddedAccountNotice,
 };

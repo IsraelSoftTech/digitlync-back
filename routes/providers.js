@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { pool } = require('../config/db');
 const { logAudit, getAdminFromRequest } = require('../services/audit-log');
+const { sendAdminAddedAccountNotice } = require('../services/notification-service');
 
 // Default location for providers without GPS (Benin center) - so they appear on map and can be dragged to set
 const DEFAULT_PROVIDER_LAT = 6.3703;
@@ -161,6 +162,7 @@ router.post('/', async (req, res) => {
     }
     const { adminId, adminUsername } = getAdminFromRequest(req);
     await logAudit({ adminId, adminUsername, actionType: 'data_edit', action: `Provider created: ${provider.full_name} (ID ${provider.id})`, entityType: 'provider', entityId: provider.id });
+    await sendAdminAddedAccountNotice({ role: 'provider', fullName: provider.full_name, phone: provider.phone });
     res.status(201).json(provider);
   } catch (err) {
     console.error('Provider create error:', err);

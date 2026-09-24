@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { pool } = require('../config/db');
 const { logAudit, getAdminFromRequest } = require('../services/audit-log');
+const { sendAdminAddedAccountNotice } = require('../services/notification-service');
 
 // GET /api/farmers/map-data - farmers + farm_plots for admin map (multiple plots supported)
 router.get('/map-data', async (req, res) => {
@@ -156,6 +157,7 @@ router.post('/', async (req, res) => {
     const farmer = result.rows[0];
     const { adminId, adminUsername } = getAdminFromRequest(req);
     await logAudit({ adminId, adminUsername, actionType: 'data_edit', action: `Farmer created: ${farmer.full_name} (ID ${farmer.id})`, entityType: 'farmer', entityId: farmer.id });
+    await sendAdminAddedAccountNotice({ role: 'farmer', fullName: farmer.full_name, phone: farmer.phone });
     res.status(201).json(farmer);
   } catch (err) {
     console.error('Farmer create error:', err);
