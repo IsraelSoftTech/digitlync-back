@@ -144,7 +144,7 @@ router.post('/', async (req, res) => {
         days_available_per_week, peak_season_capacity, required_booking_lead_time_days,
         national_id, equipment_ownership_proof, reference_contact, consent_platform_rules, agreement_no_show_penalties,
         on_time_completion_rate, job_success_rate, dispute_frequency, repeat_client_percent)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40) RETURNING *`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39) RETURNING *`,
       [p.full_name, p.phone, p.services_offered, p.work_capacity_ha_per_hour, p.base_price_per_ha, p.equipment_type, p.service_radius_km, p.notes,
         p.gps_lat, p.gps_lng, p.number_of_machines, p.equipment_condition, p.fuel_type, p.backup_equipment_available, p.years_operating,
         p.willingness_to_travel, p.travel_surcharge_per_km, p.labour_provided, p.number_of_workers, p.skilled_vs_unskilled, p.ability_to_scale_large_farms, p.minimum_booking_size_ha,
